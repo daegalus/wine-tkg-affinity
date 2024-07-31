@@ -1,8 +1,6 @@
 name: Wine Fedora CI
 
 on:
-  schedule:
-    - cron:  '25 15 * * *'
   workflow_dispatch:
 
 jobs:
