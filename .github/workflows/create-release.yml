@@ -1,0 +1,67 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create_release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y%m%d-%H%m')" >> $GITHUB_OUTPUT
+
+      - name: Get metric time
+        id: metric_time
+        run: echo "metric_time=$(printf "%.f" $(($(date -d "1970-01-01 UTC $(date +%T)" +%s) / 86.4)))" >> $GITHUB_OUTPUT
+
+      - name: Get earthdate
+        id: earthdate
+        run: echo "earthdate=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+      - name: Download Artifact (arch)
+        id: download-artifact-arch
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{secrets.WORKFLOW_GH_PAT}}
+          workflow: wine-arch.yml
+          path: artifacts
+
+      - name: Rename Artifact (arch)
+        run: mv artifacts/wine-tkg-affinity-arch/wine* artifacts/wine-tkg-affinity-arch.tar.zst
+
+      - name: Download Artifact (fedora)
+        id: download-artifact-fedora
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{secrets.WORKFLOW_GH_PAT}}
+          workflow: wine-fedora.yml
+          path: artifacts
+
+      - name: Rename Artifact (fedora)
+        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedora.tar.zst
+
+      # - name: Download Artifact (ubuntu)
+      #   id: download-artifact-ubuntu
+      #   uses: dawidd6/action-download-artifact@v6
+      #   with:
+      #     github_token: ${{secrets.WORKFLOW_GH_PAT}}
+      #     workflow: wine-ubuntu.yml
+      #     path: artifacts
+
+      # - name: Rename Artifact (ubuntu)
+      #   run: mv artifacts/wine-tkg-affinity-ubuntu/wine* artifacts/wine-tkg-affinity-ubuntu.tar.zst
+
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.date.outputs.date }}
+          tag_name: ${{ steps.date.outputs.date }}
+          files: |
+            artifacts/wine-tkg-affinity-arch.tar.zst
+            artifacts/wine-tkg-affinity-fedora.tar.zst

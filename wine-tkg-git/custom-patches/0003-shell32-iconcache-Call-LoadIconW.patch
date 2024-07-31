@@ -1,0 +1,25 @@
+From e47e861600dc5b45d5b822ab8fbf59f1c3af4ab3 Mon Sep 17 00:00:00 2001
+From: James McDonnell <topgamer7@gmail.com>
+Date: Sun, 26 Feb 2023 12:56:24 -0800
+Subject: [PATCH 03/29] shell32/iconcache: Call LoadIconW
+
+---
+ dlls/shell32/iconcache.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/shell32/iconcache.c b/dlls/shell32/iconcache.c
+index c122c145609..7e9a37db44d 100644
+--- a/dlls/shell32/iconcache.c
++++ b/dlls/shell32/iconcache.c
+@@ -1007,7 +1007,7 @@ HRESULT WINAPI SHGetStockIconInfo(SHSTOCKICONID id, UINT flags, SHSTOCKICONINFO
+     if (flags)
+         FIXME("flags 0x%x not implemented\n", flags);
+ 
+-    sii->hIcon = NULL;
++    sii->hIcon = LoadIconW(GetModuleHandleW(L"shell32.dll"), MAKEINTRESOURCEW(IDI_SHELL_FILE));
+     sii->iSysImageIndex = -1;
+ 
+     TRACE("%3d: returning %s (%d)\n", id, debugstr_w(sii->szPath), sii->iIcon);
+-- 
+2.45.2
+

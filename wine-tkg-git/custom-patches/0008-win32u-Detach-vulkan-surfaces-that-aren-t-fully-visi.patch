@@ -1,0 +1,154 @@
+From 92a038bdc706443d370b7d8a3522f5bd2f51ce6b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 3 May 2024 10:35:31 +0200
+Subject: [PATCH 08/29] win32u: Detach vulkan surfaces that aren't fully
+ visible.
+
+And attach them back when they are.
+---
+ dlls/win32u/ntuser_private.h |  1 +
+ dlls/win32u/vulkan.c         | 54 ++++++++++++++++++++++++++++++++----
+ dlls/win32u/window.c         |  3 ++
+ 3 files changed, 53 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/win32u/ntuser_private.h b/dlls/win32u/ntuser_private.h
+index 2c0d4845453..f58a1cfadac 100644
+--- a/dlls/win32u/ntuser_private.h
++++ b/dlls/win32u/ntuser_private.h
+@@ -248,6 +248,7 @@ extern void *(*p_vkGetInstanceProcAddr)(VkInstance, const char *);
+ extern BOOL vulkan_init(void);
+ extern void vulkan_detach_surfaces( struct list *surfaces );
+ extern void vulkan_set_parent( HWND hwnd, HWND new_parent, HWND old_parent );
++extern void vulkan_set_region( HWND toplevel, HRGN region );
+ 
+ /* window.c */
+ HANDLE alloc_user_handle( struct user_object *ptr, unsigned int type );
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 54d2acfb367..5f454625870 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -60,6 +60,7 @@ struct surface
+     struct list entry;
+     VkSurfaceKHR host_surface;
+     void *driver_private;
++    BOOL is_detached;
+     HWND hwnd;
+ };
+ 
+@@ -97,12 +98,17 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance instance, const VkWin
+         list_add_tail( &offscreen_surfaces, &surface->entry );
+         pthread_mutex_unlock( &vulkan_mutex );
+         driver_funcs->p_vulkan_surface_detach( info->hwnd, surface->driver_private );
++        surface->is_detached = TRUE;
+     }
+     else
+     {
+         list_add_tail( &win->vulkan_surfaces, &surface->entry );
+         release_win_ptr( win );
+-        if (toplevel != info->hwnd) driver_funcs->p_vulkan_surface_detach( info->hwnd, surface->driver_private );
++        if (toplevel != info->hwnd)
++        {
++            driver_funcs->p_vulkan_surface_detach( info->hwnd, surface->driver_private );
++            surface->is_detached = TRUE;
++        }
+     }
+ 
+     surface->hwnd = info->hwnd;
+@@ -343,7 +349,11 @@ void vulkan_detach_surfaces( struct list *surfaces )
+     struct surface *surface;
+ 
+     LIST_FOR_EACH_ENTRY( surface, surfaces, struct surface, entry )
++    {
++        if (surface->is_detached) continue;
+         driver_funcs->p_vulkan_surface_detach( surface->hwnd, surface->driver_private );
++        surface->is_detached = TRUE;
++    }
+ 
+     pthread_mutex_lock( &vulkan_mutex );
+     list_move_tail( &offscreen_surfaces, surfaces );
+@@ -352,7 +362,6 @@ void vulkan_detach_surfaces( struct list *surfaces )
+ 
+ static void append_window_surfaces( HWND toplevel, struct list *surfaces )
+ {
+-    struct surface *surface;
+     WND *win;
+ 
+     if (!(win = get_win_ptr( toplevel )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
+@@ -365,9 +374,6 @@ static void append_window_surfaces( HWND toplevel, struct list *surfaces )
+     {
+         list_move_tail( &win->vulkan_surfaces, surfaces );
+         release_win_ptr( win );
+-
+-        LIST_FOR_EACH_ENTRY( surface, surfaces, struct surface, entry )
+-            driver_funcs->p_vulkan_surface_attach( surface->hwnd, surface->driver_private );
+     }
+ }
+ 
+@@ -415,12 +421,50 @@ void vulkan_set_parent( HWND hwnd, HWND new_parent, HWND old_parent )
+ 
+     enum_window_surfaces( old_toplevel, hwnd, &surfaces );
+ 
++    /* surfaces will be re-attached as needed from surface region updates */
+     LIST_FOR_EACH_ENTRY( surface, &surfaces, struct surface, entry )
++    {
++        if (surface->is_detached) continue;
+         driver_funcs->p_vulkan_surface_detach( surface->hwnd, surface->driver_private );
++        surface->is_detached = TRUE;
++    }
+ 
+     append_window_surfaces( new_toplevel, &surfaces );
+ }
+ 
++void vulkan_set_region( HWND toplevel, HRGN region )
++{
++    struct list surfaces = LIST_INIT(surfaces);
++    struct surface *surface;
++
++    enum_window_surfaces( toplevel, toplevel, &surfaces );
++
++    LIST_FOR_EACH_ENTRY( surface, &surfaces, struct surface, entry )
++    {
++        RECT client_rect;
++        BOOL is_clipped;
++
++        NtUserGetClientRect( surface->hwnd, &client_rect );
++        NtUserMapWindowPoints( surface->hwnd, toplevel, (POINT *)&client_rect, 2 );
++        is_clipped = NtGdiRectInRegion( region, &client_rect );
++
++        if (is_clipped && !surface->is_detached)
++        {
++            TRACE( "surface %p is now clipped\n", surface->hwnd );
++            driver_funcs->p_vulkan_surface_detach( surface->hwnd, surface->driver_private );
++            surface->is_detached = TRUE;
++        }
++        else if (!is_clipped && surface->is_detached)
++        {
++            TRACE( "surface %p is now unclipped\n", surface->hwnd );
++            driver_funcs->p_vulkan_surface_attach( surface->hwnd, surface->driver_private );
++            surface->is_detached = FALSE;
++        }
++    }
++
++    append_window_surfaces( toplevel, &surfaces );
++}
++
+ /***********************************************************************
+  *      __wine_get_vulkan_driver  (win32u.so)
+  */
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index b34f53457aa..de33f612f92 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -1787,6 +1787,9 @@ static void update_surface_region( HWND hwnd )
+ done:
+     if (shape) NtGdiDeleteObjectApp( shape );
+     release_win_ptr( win );
++
++    vulkan_set_region( hwnd, region );
++    if (region) NtGdiDeleteObjectApp( region );
+ }
+ 
+ 
+-- 
+2.45.2
+
