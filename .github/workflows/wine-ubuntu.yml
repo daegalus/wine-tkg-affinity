@@ -1,8 +1,6 @@
 name: Wine Ubuntu CI
 
 on:
-  schedule:
-    - cron:  '25 21 * * *'
   workflow_dispatch:
 
 jobs:
