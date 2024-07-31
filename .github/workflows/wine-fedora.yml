@@ -2,7 +2,7 @@ name: Wine Fedora CI
 
 on:
   schedule:
-    - cron:  '25 9,21 * * *'
+    - cron:  '25 15 * * *'
   workflow_dispatch:
 
 jobs:
@@ -12,6 +12,30 @@ jobs:
     steps:
 
       - uses: actions/checkout@v4
+      - name: Delete userpatches folder
+        run: rm -rf wine-tkg-git/wine-tkg-userpatches
+      - uses: actions/checkout@v4
+        name: Checkout affinity patches
+        with:
+          repository: oh-ok/wine-affinity-patches
+          path: wine-tkg-git/wine-tkg-userpatches
+          sparse-checkout: |
+            dxcore.mypatch
+            opencl.mypatch
+            wintypes.mypatch
+          sparse-checkout-cone-mode: false
+      - name: Cache wine-git
+        id: cache-wine-git
+        uses: actions/cache@v4
+        with:
+          path: wine-tkg-git/wine-git
+          key: wine-git
+      - name: Cache wine-staging-git
+        id: cache-wine-staging-git
+        uses: actions/cache@v4
+        with:
+          path: wine-tkg-git/wine-staging-git
+          key: wine-staging-git
       - name: Compilation
         run: |
           sudo dnf -y -q upgrade --refresh

@@ -2,26 +2,50 @@ name: Wine Arch Linux CI
 
 on:
   schedule:
-    - cron:  '45 8,20 * * *'
+    - cron:  '45 8 * * *'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: archlinux:latest
+    container: archlinux:multilib-devel
 
     steps:
       - uses: actions/checkout@v4
+      - name: Delete userpatches folder
+        run: rm -rf wine-tkg-git/wine-tkg-userpatches
+      - uses: actions/checkout@v4
+        name: Checkout affinity patches
+        with:
+          repository: oh-ok/wine-affinity-patches
+          path: wine-tkg-git/wine-tkg-userpatches
+          sparse-checkout: |
+            dxcore.mypatch
+            opencl.mypatch
+            wintypes.mypatch
+          sparse-checkout-cone-mode: false
+      - name: Cache wine-git
+        id: cache-wine-git
+        uses: actions/cache@v4
+        with:
+          path: wine-tkg-git/wine-git
+          key: wine-git
+      - name: Cache wine-staging-git
+        id: cache-wine-staging-git
+        uses: actions/cache@v4
+        with:
+          path: wine-tkg-git/wine-staging-git
+          key: wine-staging-git
       - name: Compile
         run: |
-          echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
+          # echo -e "[multilib]\nInclude = /etc/pacman.d/mirrorlist" >> /etc/pacman.conf
           pacman -Syu --noconfirm base-devel sudo
           useradd user -G wheel && echo "user ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
           chown user -R . && cd wine-tkg-git
           # Workaround for jack&jack2 conflict https://github.com/Frogging-Family/wine-tkg-git/issues/237
           sed -i "/'jack2'                 'lib32-jack2'/d" PKGBUILD
           sed -i "/'gst-plugins-good'      'lib32-gst-plugins-good'/d" PKGBUILD 
-          sed -i 's/wayland_driver="false"/wayland_driver="true"/' customization.cfg
+          # sed -i 's/wayland_driver="false"/wayland_driver="true"/' customization.cfg
           su user -c "yes|PKGDEST=/tmp/wine-tkg makepkg --noconfirm -s"
 
       - name: Archive the artifacts
