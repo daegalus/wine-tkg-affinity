@@ -1,0 +1,129 @@
+From 340ba20ca6271acd38f717f6a61d0bfcc8cd398f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 24 Apr 2024 11:12:31 +0200
+Subject: [PATCH 06/29] win32u: Move vulkan surfaces to their new parent when
+ reparenting.
+
+---
+ dlls/win32u/ntuser_private.h |  1 +
+ dlls/win32u/vulkan.c         | 79 ++++++++++++++++++++++++++++++++++++
+ dlls/win32u/window.c         |  1 +
+ 3 files changed, 81 insertions(+)
+
+diff --git a/dlls/win32u/ntuser_private.h b/dlls/win32u/ntuser_private.h
+index a361e1d73a5..2c0d4845453 100644
+--- a/dlls/win32u/ntuser_private.h
++++ b/dlls/win32u/ntuser_private.h
+@@ -247,6 +247,7 @@ extern void *(*p_vkGetInstanceProcAddr)(VkInstance, const char *);
+ 
+ extern BOOL vulkan_init(void);
+ extern void vulkan_detach_surfaces( struct list *surfaces );
++extern void vulkan_set_parent( HWND hwnd, HWND new_parent, HWND old_parent );
+ 
+ /* window.c */
+ HANDLE alloc_user_handle( struct user_object *ptr, unsigned int type );
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 5eb2d26a8a2..0cec13f3f23 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -336,6 +336,85 @@ void vulkan_detach_surfaces( struct list *surfaces )
+     pthread_mutex_unlock( &vulkan_mutex );
+ }
+ 
++static void append_window_surfaces( HWND toplevel, struct list *surfaces )
++{
++    WND *win;
++
++    if (!(win = get_win_ptr( toplevel )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
++    {
++        pthread_mutex_lock( &vulkan_mutex );
++        list_move_tail( &offscreen_surfaces, surfaces );
++        pthread_mutex_unlock( &vulkan_mutex );
++    }
++    else
++    {
++        list_move_tail( &win->vulkan_surfaces, surfaces );
++        release_win_ptr( win );
++    }
++}
++
++static void enum_window_surfaces( HWND toplevel, HWND hwnd, struct list *surfaces )
++{
++    struct list tmp_surfaces = LIST_INIT(tmp_surfaces);
++    struct surface *surface, *next;
++    WND *win;
++
++    if (!(win = get_win_ptr( toplevel )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
++    {
++        pthread_mutex_lock( &vulkan_mutex );
++        list_move_tail( &tmp_surfaces, &offscreen_surfaces );
++        pthread_mutex_unlock( &vulkan_mutex );
++    }
++    else
++    {
++        list_move_tail( &tmp_surfaces, &win->vulkan_surfaces );
++        release_win_ptr( win );
++    }
++
++    LIST_FOR_EACH_ENTRY_SAFE( surface, next, &tmp_surfaces, struct surface, entry )
++    {
++        if (surface->hwnd != hwnd && !NtUserIsChild( hwnd, surface->hwnd )) continue;
++        list_remove( &surface->entry );
++        list_add_tail( surfaces, &surface->entry );
++    }
++
++    append_window_surfaces( toplevel, &tmp_surfaces );
++}
++
++void vulkan_set_parent( HWND hwnd, HWND new_parent, HWND old_parent )
++{
++    struct list surfaces = LIST_INIT(surfaces);
++    HWND new_toplevel, old_toplevel;
++
++    TRACE( "hwnd %p new_parent %p old_parent %p\n", hwnd, new_parent, old_parent );
++
++    if (new_parent == NtUserGetDesktopWindow()) new_toplevel = hwnd;
++    else new_toplevel = NtUserGetAncestor( new_parent, GA_ROOT );
++    if (old_parent == NtUserGetDesktopWindow()) old_toplevel = hwnd;
++    else old_toplevel = NtUserGetAncestor( old_parent, GA_ROOT );
++    if (old_toplevel == new_toplevel) return;
++
++    enum_window_surfaces( old_toplevel, hwnd, &surfaces );
++    append_window_surfaces( new_toplevel, &surfaces );
++}
++
++/***********************************************************************
++ *      __wine_get_vulkan_driver  (win32u.so)
++ */
++const struct vulkan_funcs *__wine_get_vulkan_driver( UINT version )
++{
++    static pthread_once_t init_once = PTHREAD_ONCE_INIT;
++
++    if (version != WINE_VULKAN_DRIVER_VERSION)
++    {
++        ERR( "version mismatch, vulkan wants %u but win32u has %u\n", version, WINE_VULKAN_DRIVER_VERSION );
++        return NULL;
++    }
++
++    pthread_once( &init_once, vulkan_init );
++    return vulkan_handle ? &vulkan_funcs : NULL;
++}
++
+ #else /* SONAME_LIBVULKAN */
+ 
+ void vulkan_detach_surfaces( struct list *surfaces )
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 4499e226a7b..b34f53457aa 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -462,6 +462,7 @@ HWND WINAPI NtUserSetParent( HWND hwnd, HWND parent )
+     context = set_thread_dpi_awareness_context( get_window_dpi_awareness_context( hwnd ));
+ 
+     user_driver->pSetParent( full_handle, parent, old_parent );
++    vulkan_set_parent( full_handle, parent, old_parent );
+ 
+     winpos.hwnd = hwnd;
+     winpos.hwndInsertAfter = HWND_TOP;
+-- 
+2.45.2
+

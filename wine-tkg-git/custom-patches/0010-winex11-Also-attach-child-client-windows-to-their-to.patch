@@ -1,0 +1,121 @@
+From 8b47de92e686201c0696ef04135b5ccc09c993e6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 29 Mar 2024 10:49:46 +0100
+Subject: [PATCH 10/29] winex11: Also attach child client windows to their
+ toplevel window.
+
+---
+ dlls/winex11.drv/window.c | 54 +++++++++++++++++++++++++++++----------
+ 1 file changed, 40 insertions(+), 14 deletions(-)
+
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 2b9bfe302ae..ed77922e639 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1475,8 +1475,21 @@ static void sync_client_position( struct x11drv_win_data *data,
+ 
+     if (!data->client_window) return;
+ 
+-    changes.x      = data->client_rect.left - data->whole_rect.left;
+-    changes.y      = data->client_rect.top - data->whole_rect.top;
++    if (data->whole_window)
++    {
++        changes.x = data->client_rect.left - data->whole_rect.left;
++        changes.y = data->client_rect.top - data->whole_rect.top;
++    }
++    else
++    {
++        HWND toplevel = NtUserGetAncestor( data->hwnd, GA_ROOT );
++        POINT pos = {data->client_rect.left, data->client_rect.top};
++
++        NtUserMapWindowPoints( toplevel, toplevel, &pos, 1 );
++        changes.x = pos.x;
++        changes.y = pos.y;
++    }
++
+     changes.width  = min( max( 1, data->client_rect.right - data->client_rect.left ), 65535 );
+     changes.height = min( max( 1, data->client_rect.bottom - data->client_rect.top ), 65535 );
+ 
+@@ -1628,11 +1641,8 @@ void detach_client_window( struct x11drv_win_data *data, Window client_window )
+ 
+     TRACE( "%p/%lx detaching client window %lx\n", data->hwnd, data->whole_window, client_window );
+ 
+-    if (data->whole_window)
+-    {
+-        client_window_events_disable( data, client_window );
+-        XReparentWindow( gdi_display, client_window, get_dummy_parent(), 0, 0 );
+-    }
++    client_window_events_disable( data, client_window );
++    XReparentWindow( gdi_display, client_window, get_dummy_parent(), 0, 0 );
+ 
+     data->client_window = 0;
+ }
+@@ -1643,18 +1653,33 @@ void detach_client_window( struct x11drv_win_data *data, Window client_window )
+  */
+ void attach_client_window( struct x11drv_win_data *data, Window client_window )
+ {
++    Window whole_window;
++    POINT pos = {0};
++
+     if (data->client_window == client_window || !client_window) return;
+ 
+     TRACE( "%p/%lx attaching client window %lx\n", data->hwnd, data->whole_window, client_window );
+ 
+     detach_client_window( data, data->client_window );
+ 
+-    if (data->whole_window)
++    if ((whole_window = data->whole_window))
+     {
+-        client_window_events_enable( data, client_window );
+-        XReparentWindow( gdi_display, client_window, data->whole_window, data->client_rect.left - data->whole_rect.left,
+-                         data->client_rect.top - data->whole_rect.top );
++        pos.x = data->client_rect.left - data->whole_rect.left;
++        pos.y = data->client_rect.top - data->whole_rect.top;
+     }
++    else
++    {
++        HWND toplevel = NtUserGetAncestor( data->hwnd, GA_ROOT );
++        whole_window = X11DRV_get_whole_window( toplevel );
++
++        pos.x = data->client_rect.left;
++        pos.y = data->client_rect.top;
++        NtUserMapWindowPoints( toplevel, toplevel, &pos, 1 );
++    }
++    if (!whole_window) whole_window = get_dummy_parent();
++
++    client_window_events_enable( data, client_window );
++    XReparentWindow( gdi_display, client_window, whole_window, pos.x, pos.y );
+ 
+     data->client_window = client_window;
+ }
+@@ -1819,6 +1844,9 @@ static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_des
+ {
+     TRACE( "win %p xwin %lx/%lx\n", data->hwnd, data->whole_window, data->client_window );
+ 
++    if (!already_destroyed) detach_client_window( data, data->client_window );
++    else if (data->client_window) client_window_events_disable( data, data->client_window );
++
+     if (!data->whole_window)
+     {
+         if (data->embedded)
+@@ -1835,8 +1863,6 @@ static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_des
+     }
+     else
+     {
+-        if (!already_destroyed) detach_client_window( data, data->client_window );
+-        else if (data->client_window) client_window_events_disable( data, data->client_window );
+         XDeleteContext( data->display, data->whole_window, winContext );
+         if (!already_destroyed)
+         {
+@@ -1845,7 +1871,7 @@ static void destroy_whole_window( struct x11drv_win_data *data, BOOL already_des
+         }
+     }
+     if (data->whole_colormap) XFreeColormap( data->display, data->whole_colormap );
+-    data->whole_window = data->client_window = 0;
++    data->whole_window = 0;
+     data->whole_colormap = 0;
+     data->wm_state = WithdrawnState;
+     data->net_wm_state = 0;
+-- 
+2.45.2
+

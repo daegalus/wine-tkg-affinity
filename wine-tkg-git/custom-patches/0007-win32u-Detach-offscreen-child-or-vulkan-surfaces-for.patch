@@ -1,0 +1,240 @@
+From f1c63ffdc31d2e9608e8058423d8853a08cecdd9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 3 May 2024 10:33:06 +0200
+Subject: [PATCH 07/29] win32u: Detach offscreen, child or vulkan surfaces for
+ another process.
+
+And attach them back when they are on-screen again.
+---
+ dlls/win32u/vulkan.c          | 23 +++++++++++++++++++++++
+ dlls/winemac.drv/vulkan.c     |  5 +++++
+ dlls/winewayland.drv/vulkan.c |  5 +++++
+ dlls/winex11.drv/vulkan.c     | 15 +++++++++++++++
+ dlls/winex11.drv/window.c     |  2 +-
+ dlls/winex11.drv/x11drv.h     |  1 +
+ include/wine/vulkan_driver.h  |  3 ++-
+ 7 files changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 0cec13f3f23..54d2acfb367 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -96,11 +96,13 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance instance, const VkWin
+         pthread_mutex_lock( &vulkan_mutex );
+         list_add_tail( &offscreen_surfaces, &surface->entry );
+         pthread_mutex_unlock( &vulkan_mutex );
++        driver_funcs->p_vulkan_surface_detach( info->hwnd, surface->driver_private );
+     }
+     else
+     {
+         list_add_tail( &win->vulkan_surfaces, &surface->entry );
+         release_win_ptr( win );
++        if (toplevel != info->hwnd) driver_funcs->p_vulkan_surface_detach( info->hwnd, surface->driver_private );
+     }
+ 
+     surface->hwnd = info->hwnd;
+@@ -198,6 +200,10 @@ static void nulldrv_vulkan_surface_destroy( HWND hwnd, void *private )
+ {
+ }
+ 
++static void nulldrv_vulkan_surface_attach( HWND hwnd, void *private )
++{
++}
++
+ static void nulldrv_vulkan_surface_detach( HWND hwnd, void *private )
+ {
+ }
+@@ -220,6 +226,7 @@ static const struct vulkan_driver_funcs nulldrv_funcs =
+ {
+     .p_vulkan_surface_create = nulldrv_vulkan_surface_create,
+     .p_vulkan_surface_destroy = nulldrv_vulkan_surface_destroy,
++    .p_vulkan_surface_attach = nulldrv_vulkan_surface_attach,
+     .p_vulkan_surface_detach = nulldrv_vulkan_surface_detach,
+     .p_vulkan_surface_presented = nulldrv_vulkan_surface_presented,
+     .p_vkGetPhysicalDeviceWin32PresentationSupportKHR = nulldrv_vkGetPhysicalDeviceWin32PresentationSupportKHR,
+@@ -264,6 +271,12 @@ static void lazydrv_vulkan_surface_destroy( HWND hwnd, void *private )
+     return driver_funcs->p_vulkan_surface_destroy( hwnd, private );
+ }
+ 
++static void lazydrv_vulkan_surface_attach( HWND hwnd, void *private )
++{
++    vulkan_driver_load();
++    return driver_funcs->p_vulkan_surface_attach( hwnd, private );
++}
++
+ static void lazydrv_vulkan_surface_detach( HWND hwnd, void *private )
+ {
+     vulkan_driver_load();
+@@ -292,6 +305,7 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
+ {
+     .p_vulkan_surface_create = lazydrv_vulkan_surface_create,
+     .p_vulkan_surface_destroy = lazydrv_vulkan_surface_destroy,
++    .p_vulkan_surface_attach = lazydrv_vulkan_surface_attach,
+     .p_vulkan_surface_detach = lazydrv_vulkan_surface_detach,
+     .p_vulkan_surface_presented = lazydrv_vulkan_surface_presented,
+ };
+@@ -338,6 +352,7 @@ void vulkan_detach_surfaces( struct list *surfaces )
+ 
+ static void append_window_surfaces( HWND toplevel, struct list *surfaces )
+ {
++    struct surface *surface;
+     WND *win;
+ 
+     if (!(win = get_win_ptr( toplevel )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
+@@ -350,6 +365,9 @@ static void append_window_surfaces( HWND toplevel, struct list *surfaces )
+     {
+         list_move_tail( &win->vulkan_surfaces, surfaces );
+         release_win_ptr( win );
++
++        LIST_FOR_EACH_ENTRY( surface, surfaces, struct surface, entry )
++            driver_funcs->p_vulkan_surface_attach( surface->hwnd, surface->driver_private );
+     }
+ }
+ 
+@@ -385,6 +403,7 @@ void vulkan_set_parent( HWND hwnd, HWND new_parent, HWND old_parent )
+ {
+     struct list surfaces = LIST_INIT(surfaces);
+     HWND new_toplevel, old_toplevel;
++    struct surface *surface;
+ 
+     TRACE( "hwnd %p new_parent %p old_parent %p\n", hwnd, new_parent, old_parent );
+ 
+@@ -395,6 +414,10 @@ void vulkan_set_parent( HWND hwnd, HWND new_parent, HWND old_parent )
+     if (old_toplevel == new_toplevel) return;
+ 
+     enum_window_surfaces( old_toplevel, hwnd, &surfaces );
++
++    LIST_FOR_EACH_ENTRY( surface, &surfaces, struct surface, entry )
++        driver_funcs->p_vulkan_surface_detach( surface->hwnd, surface->driver_private );
++
+     append_window_surfaces( new_toplevel, &surfaces );
+ }
+ 
+diff --git a/dlls/winemac.drv/vulkan.c b/dlls/winemac.drv/vulkan.c
+index d5a3df579d0..9b033a84d57 100644
+--- a/dlls/winemac.drv/vulkan.c
++++ b/dlls/winemac.drv/vulkan.c
+@@ -178,6 +178,10 @@ static void macdrv_vulkan_surface_destroy(HWND hwnd, void *private)
+     wine_vk_surface_destroy(mac_surface);
+ }
+ 
++static void macdrv_vulkan_surface_attach(HWND hwnd, void *private)
++{
++}
++
+ static void macdrv_vulkan_surface_detach(HWND hwnd, void *private)
+ {
+ }
+@@ -203,6 +207,7 @@ static const struct vulkan_driver_funcs macdrv_vulkan_driver_funcs =
+ {
+     .p_vulkan_surface_create = macdrv_vulkan_surface_create,
+     .p_vulkan_surface_destroy = macdrv_vulkan_surface_destroy,
++    .p_vulkan_surface_attach = macdrv_vulkan_surface_attach,
+     .p_vulkan_surface_detach = macdrv_vulkan_surface_detach,
+     .p_vulkan_surface_presented = macdrv_vulkan_surface_presented,
+ 
+diff --git a/dlls/winewayland.drv/vulkan.c b/dlls/winewayland.drv/vulkan.c
+index 16084175013..cd63981bf0d 100644
+--- a/dlls/winewayland.drv/vulkan.c
++++ b/dlls/winewayland.drv/vulkan.c
+@@ -132,6 +132,10 @@ static void wayland_vulkan_surface_destroy(HWND hwnd, void *private)
+     wine_vk_surface_destroy(client);
+ }
+ 
++static void wayland_vulkan_surface_attach(HWND hwnd, void *private)
++{
++}
++
+ static void wayland_vulkan_surface_detach(HWND hwnd, void *private)
+ {
+ }
+@@ -175,6 +179,7 @@ static const struct vulkan_driver_funcs wayland_vulkan_driver_funcs =
+ {
+     .p_vulkan_surface_create = wayland_vulkan_surface_create,
+     .p_vulkan_surface_destroy = wayland_vulkan_surface_destroy,
++    .p_vulkan_surface_attach = wayland_vulkan_surface_attach,
+     .p_vulkan_surface_detach = wayland_vulkan_surface_detach,
+     .p_vulkan_surface_presented = wayland_vulkan_surface_presented,
+ 
+diff --git a/dlls/winex11.drv/vulkan.c b/dlls/winex11.drv/vulkan.c
+index 85993bc517a..b979da1085e 100644
+--- a/dlls/winex11.drv/vulkan.c
++++ b/dlls/winex11.drv/vulkan.c
+@@ -109,6 +109,20 @@ static void X11DRV_vulkan_surface_destroy( HWND hwnd, void *private )
+     destroy_client_window( hwnd, client_window );
+ }
+ 
++static void X11DRV_vulkan_surface_attach( HWND hwnd, void *private )
++{
++    Window client_window = (Window)private;
++    struct x11drv_win_data *data;
++
++    TRACE( "%p %p\n", hwnd, private );
++
++    if ((data = get_win_data( hwnd )))
++    {
++        attach_client_window( data, client_window );
++        release_win_data( data );
++    }
++}
++
+ static void X11DRV_vulkan_surface_detach( HWND hwnd, void *private )
+ {
+     Window client_window = (Window)private;
+@@ -145,6 +159,7 @@ static const struct vulkan_driver_funcs x11drv_vulkan_driver_funcs =
+ {
+     .p_vulkan_surface_create = X11DRV_vulkan_surface_create,
+     .p_vulkan_surface_destroy = X11DRV_vulkan_surface_destroy,
++    .p_vulkan_surface_attach = X11DRV_vulkan_surface_attach,
+     .p_vulkan_surface_detach = X11DRV_vulkan_surface_detach,
+     .p_vulkan_surface_presented = X11DRV_vulkan_surface_presented,
+ 
+diff --git a/dlls/winex11.drv/window.c b/dlls/winex11.drv/window.c
+index 98cb7952164..2b9bfe302ae 100644
+--- a/dlls/winex11.drv/window.c
++++ b/dlls/winex11.drv/window.c
+@@ -1641,7 +1641,7 @@ void detach_client_window( struct x11drv_win_data *data, Window client_window )
+ /**********************************************************************
+  *             attach_client_window
+  */
+-static void attach_client_window( struct x11drv_win_data *data, Window client_window )
++void attach_client_window( struct x11drv_win_data *data, Window client_window )
+ {
+     if (data->client_window == client_window || !client_window) return;
+ 
+diff --git a/dlls/winex11.drv/x11drv.h b/dlls/winex11.drv/x11drv.h
+index fc57c72cb79..0e4bdc52661 100644
+--- a/dlls/winex11.drv/x11drv.h
++++ b/dlls/winex11.drv/x11drv.h
+@@ -646,6 +646,7 @@ extern void read_net_wm_states( Display *display, struct x11drv_win_data *data )
+ extern void update_net_wm_states( struct x11drv_win_data *data );
+ extern void make_window_embedded( struct x11drv_win_data *data );
+ extern Window create_client_window( HWND hwnd, const XVisualInfo *visual, Colormap colormap );
++extern void attach_client_window( struct x11drv_win_data *data, Window client_window );
+ extern void detach_client_window( struct x11drv_win_data *data, Window client_window );
+ extern void destroy_client_window( HWND hwnd, Window client_window );
+ extern void set_window_visual( struct x11drv_win_data *data, const XVisualInfo *vis, BOOL use_alpha );
+diff --git a/include/wine/vulkan_driver.h b/include/wine/vulkan_driver.h
+index 7ddba4739f4..180cff0e09b 100644
+--- a/include/wine/vulkan_driver.h
++++ b/include/wine/vulkan_driver.h
+@@ -21,7 +21,7 @@
+ #define __WINE_VULKAN_DRIVER_H
+ 
+ /* Wine internal vulkan driver version, needs to be bumped upon vulkan_funcs changes. */
+-#define WINE_VULKAN_DRIVER_VERSION 34
++#define WINE_VULKAN_DRIVER_VERSION 35
+ 
+ struct vulkan_funcs
+ {
+@@ -46,6 +46,7 @@ struct vulkan_driver_funcs
+ {
+     VkResult (*p_vulkan_surface_create)(HWND, VkInstance, VkSurfaceKHR *, void **);
+     void (*p_vulkan_surface_destroy)(HWND, void *);
++    void (*p_vulkan_surface_attach)(HWND, void *);
+     void (*p_vulkan_surface_detach)(HWND, void *);
+     void (*p_vulkan_surface_presented)(HWND, VkResult);
+ 
+-- 
+2.45.2
+

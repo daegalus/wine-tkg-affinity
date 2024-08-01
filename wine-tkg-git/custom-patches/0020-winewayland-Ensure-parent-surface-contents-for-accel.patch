@@ -1,0 +1,77 @@
+From a90e7463c2aa28129a606297670514a7d5fb52af Mon Sep 17 00:00:00 2001
+From: Alexandros Frantzis <alexandros.frantzis@collabora.com>
+Date: Thu, 11 Jul 2024 16:29:48 +0300
+Subject: [PATCH 20/29] winewayland: Ensure parent surface contents for
+ accelerated windows.
+
+---
+ dlls/winewayland.drv/opengl.c | 26 +++++++++++++++-----------
+ dlls/winewayland.drv/vulkan.c |  4 +++-
+ 2 files changed, 18 insertions(+), 12 deletions(-)
+
+diff --git a/dlls/winewayland.drv/opengl.c b/dlls/winewayland.drv/opengl.c
+index 994154968b3..eaf07cabc6a 100644
+--- a/dlls/winewayland.drv/opengl.c
++++ b/dlls/winewayland.drv/opengl.c
+@@ -267,21 +267,25 @@ static void wayland_gl_drawable_sync_size(struct wayland_gl_drawable *gl)
+ static void wayland_gl_drawable_sync_surface_state(struct wayland_gl_drawable *gl)
+ {
+     struct wayland_surface *wayland_surface;
++    HWND hwnd = gl->hwnd;
+ 
+-    if (!(wayland_surface = wayland_surface_lock_hwnd(gl->hwnd))) return;
++    while (hwnd && (wayland_surface = wayland_surface_lock_hwnd(hwnd)))
++    {
++        wayland_surface_ensure_contents(wayland_surface);
+ 
+-    wayland_surface_ensure_contents(wayland_surface);
++        /* Handle any processed configure request, to ensure the related
++         * surface state is applied by the compositor. */
++        if (wayland_surface->processing.serial &&
++            wayland_surface->processing.processed &&
++            wayland_surface_reconfigure(wayland_surface))
++        {
++            wl_surface_commit(wayland_surface->wl_surface);
++        }
+ 
+-    /* Handle any processed configure request, to ensure the related
+-     * surface state is applied by the compositor. */
+-    if (wayland_surface->processing.serial &&
+-        wayland_surface->processing.processed &&
+-        wayland_surface_reconfigure(wayland_surface))
+-    {
+-        wl_surface_commit(wayland_surface->wl_surface);
++        hwnd = wayland_surface->parent_weak_ref ?
++               wayland_surface->parent_weak_ref->hwnd : 0;
++        pthread_mutex_unlock(&wayland_surface->mutex);
+     }
+-
+-    pthread_mutex_unlock(&wayland_surface->mutex);
+ }
+ 
+ static BOOL wgl_context_make_current(struct wgl_context *ctx, HWND draw_hwnd,
+diff --git a/dlls/winewayland.drv/vulkan.c b/dlls/winewayland.drv/vulkan.c
+index 175d8cfa49a..02f3a6104ef 100644
+--- a/dlls/winewayland.drv/vulkan.c
++++ b/dlls/winewayland.drv/vulkan.c
+@@ -144,7 +144,7 @@ static void wayland_vulkan_surface_presented(HWND hwnd, VkResult result)
+ {
+     struct wayland_surface *wayland_surface;
+ 
+-    if ((wayland_surface = wayland_surface_lock_hwnd(hwnd)))
++    while (hwnd && (wayland_surface = wayland_surface_lock_hwnd(hwnd)))
+     {
+         wayland_surface_ensure_contents(wayland_surface);
+ 
+@@ -157,6 +157,8 @@ static void wayland_vulkan_surface_presented(HWND hwnd, VkResult result)
+             wl_surface_commit(wayland_surface->wl_surface);
+         }
+ 
++        hwnd = wayland_surface->parent_weak_ref ?
++               wayland_surface->parent_weak_ref->hwnd : 0;
+         pthread_mutex_unlock(&wayland_surface->mutex);
+     }
+ }
+-- 
+2.45.2
+
