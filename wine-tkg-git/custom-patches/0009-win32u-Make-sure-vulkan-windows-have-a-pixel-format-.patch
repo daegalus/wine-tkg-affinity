@@ -1,0 +1,27 @@
+From 2c7ad6b25ae37bb815df74a962b3cc2d6467a237 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 2 May 2024 11:55:59 +0200
+Subject: [PATCH 09/29] win32u: Make sure vulkan windows have a pixel format
+ selected.
+
+---
+ dlls/win32u/vulkan.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 5f454625870..f78e8b5db8f 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -92,6 +92,9 @@ static VkResult win32u_vkCreateWin32SurfaceKHR( VkInstance instance, const VkWin
+         return res;
+     }
+ 
++    /* make sure the window has a pixel format selected to get consistent window surface updates */
++    if (!win32u_get_window_pixel_format( info->hwnd )) win32u_set_window_pixel_format( info->hwnd, 1, TRUE );
++
+     if (!(win = get_win_ptr( toplevel )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
+     {
+         pthread_mutex_lock( &vulkan_mutex );
+-- 
+2.45.2
+

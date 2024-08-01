@@ -1,0 +1,50 @@
+From 92007b1352c024fc2309fc152c9b316b4bff2bf3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 28 Jun 2024 20:23:44 +0200
+Subject: [PATCH 28/29] winewayland: Use WL_SHM_FORMAT_ARGB8888 format for
+ window surfaces.
+
+---
+ dlls/winewayland.drv/window_surface.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/dlls/winewayland.drv/window_surface.c b/dlls/winewayland.drv/window_surface.c
+index e9eb74b17ca..3b354925a8e 100644
+--- a/dlls/winewayland.drv/window_surface.c
++++ b/dlls/winewayland.drv/window_surface.c
+@@ -154,7 +154,7 @@ static struct wayland_shm_buffer *wayland_buffer_queue_get_free_buffer(struct wa
+         if (nbuffers < 3)
+         {
+             shm_buffer = wayland_shm_buffer_create(queue->width, queue->height,
+-                                                   WL_SHM_FORMAT_XRGB8888);
++                                                   WL_SHM_FORMAT_ARGB8888);
+             if (shm_buffer)
+             {
+                 /* Buffer events go to their own queue so that we can dispatch
+@@ -262,7 +262,7 @@ static void copy_pixel_region(const char *src_pixels, RECT *src_rect,
+     {
+         const char *src;
+         char *dst;
+-        int y, width_bytes, height;
++        int x, y, width_bytes, height;
+         RECT rc;
+ 
+         TRACE("rect %s\n", wine_dbgstr_rect(rgn_rect));
+@@ -279,12 +279,14 @@ static void copy_pixel_region(const char *src_pixels, RECT *src_rect,
+         if (width_bytes == src_stride && width_bytes == dst_stride)
+         {
+             memcpy(dst, src, height * width_bytes);
++            for (x = 3; x < height * width_bytes; x += bpp) dst[x] = 0xff;
+             continue;
+         }
+ 
+         for (y = 0; y < height; y++)
+         {
+             memcpy(dst, src, width_bytes);
++            for (x = 3; x < width_bytes; x += bpp) dst[x] = 0xff;
+             src += src_stride;
+             dst += dst_stride;
+         }
+-- 
+2.45.2
+
