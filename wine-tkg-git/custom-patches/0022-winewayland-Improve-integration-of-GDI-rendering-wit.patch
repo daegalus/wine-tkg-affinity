@@ -1,0 +1,86 @@
+From 9a93b5b17660c26e00275d028b7492fd052b4fd5 Mon Sep 17 00:00:00 2001
+From: Alexandros Frantzis <alexandros.frantzis@collabora.com>
+Date: Tue, 23 Jul 2024 15:06:43 +0300
+Subject: [PATCH 22/29] winewayland: Improve integration of GDI rendering with
+ accelerated content.
+
+Created dedicated Wayland surfaces and window surfaces for child windows
+whose contents may be obscured by the client area subsurfaces we
+use to display accelerated content.
+---
+ dlls/winewayland.drv/window.c | 30 ++++++++++++++++++++++++------
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/winewayland.drv/window.c b/dlls/winewayland.drv/window.c
+index e160ef9ce12..ca1bdca5ddb 100644
+--- a/dlls/winewayland.drv/window.c
++++ b/dlls/winewayland.drv/window.c
+@@ -229,7 +229,8 @@ static struct wayland_win_data *wayland_win_data_get_top_parent(struct wayland_w
+     return cur == data->hwnd ? NULL : wayland_win_data_get_nolock(cur);
+ }
+ 
+-static BOOL wayland_win_data_needs_wayland_surface(struct wayland_win_data *data)
++static BOOL wayland_win_data_needs_wayland_surface(struct wayland_win_data *data,
++                                                   struct wayland_win_data *parent_data)
+ {
+     HWND parent = NtUserGetAncestor(data->hwnd, GA_PARENT);
+ 
+@@ -246,6 +247,17 @@ static BOOL wayland_win_data_needs_wayland_surface(struct wayland_win_data *data
+         if (has_client) return TRUE;
+     }
+ 
++    /* We want a Wayland surface if the parent has a client area subsurface
++     * which may obscure our contents (as a child window of that parent). */
++    if (parent_data->wayland_surface)
++    {
++        BOOL parent_has_client;
++        pthread_mutex_lock(&parent_data->wayland_surface->mutex);
++        parent_has_client = !!parent_data->wayland_surface->client;
++        pthread_mutex_unlock(&parent_data->wayland_surface->mutex);
++        if (parent_has_client) return TRUE;
++    }
++
+     return FALSE;
+ }
+ 
+@@ -262,8 +274,12 @@ static void wayland_win_data_update_wayland_surface(struct wayland_win_data *dat
+ 
+     TRACE("hwnd=%p flags=0x%x\n", data->hwnd, flags);
+ 
++    /* We anchor child windows to their toplevel parent window. */
++    parent_data = wayland_win_data_get_top_parent(data);
++
+     /* Destroy unused surfaces of child windows. */
+-    if (!wayland_win_data_needs_wayland_surface(data) && !(flags & UWS_FORCE_CREATE))
++    if (!wayland_win_data_needs_wayland_surface(data, parent_data) &&
++        !(flags & UWS_FORCE_CREATE))
+     {
+         if (surface)
+         {
+@@ -278,8 +294,6 @@ static void wayland_win_data_update_wayland_surface(struct wayland_win_data *dat
+ 
+     if (NtUserIsWindowVisible(data->hwnd))
+     {
+-        /* We anchor child windows to their toplevel parent window. */
+-        parent_data = wayland_win_data_get_top_parent(data);
+         if (parent_data && parent_data->wayland_surface)
+             role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
+         else
+@@ -564,8 +578,12 @@ BOOL WAYLAND_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const REC
+     if (!data && !(data = wayland_win_data_create(hwnd, window_rect, client_rect, visible_rect)))
+         return FALSE; /* use default surface */
+ 
+-    parent = NtUserGetAncestor(hwnd, GA_PARENT);
+-    if ((parent && parent != NtUserGetDesktopWindow())) goto done; /* use default surface */
++    /* Use the default surface for child windows, unless we need a dedicated
++     * wayland surface in which case use a dedicated window surface. */
++     parent = NtUserGetAncestor(hwnd, GA_PARENT);
++     if (parent && parent != NtUserGetDesktopWindow() &&
++         !wayland_win_data_needs_wayland_surface(data, wayland_win_data_get_top_parent(data)))
++        goto done; /* use default surface */
+ 
+     ret = TRUE;
+ 
+-- 
+2.45.2
+

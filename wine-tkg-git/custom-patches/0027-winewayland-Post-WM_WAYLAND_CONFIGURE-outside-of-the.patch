@@ -1,0 +1,46 @@
+From 148655be5ab46b1f39b60f30c837b73d5f190b5a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 28 Jun 2024 21:22:18 +0200
+Subject: [PATCH 27/29] winewayland: Post WM_WAYLAND_CONFIGURE outside of the
+ surface lock.
+
+---
+ dlls/winewayland.drv/wayland_surface.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/winewayland.drv/wayland_surface.c b/dlls/winewayland.drv/wayland_surface.c
+index 4ace7a16246..6b582ada765 100644
+--- a/dlls/winewayland.drv/wayland_surface.c
++++ b/dlls/winewayland.drv/wayland_surface.c
+@@ -38,7 +38,7 @@ static void xdg_surface_handle_configure(void *data, struct xdg_surface *xdg_sur
+                                          uint32_t serial)
+ {
+     struct wayland_surface *surface;
+-    BOOL initial_configure = FALSE;
++    BOOL should_post = FALSE, initial_configure = FALSE;
+     HWND hwnd = data;
+ 
+     TRACE("serial=%u\n", serial);
+@@ -52,16 +52,17 @@ static void xdg_surface_handle_configure(void *data, struct xdg_surface *xdg_sur
+         /* If we have a previously requested config, we have already sent a
+          * WM_WAYLAND_CONFIGURE which hasn't been handled yet. In that case,
+          * avoid sending another message to reduce message queue traffic. */
+-        BOOL should_post = surface->requested.serial == 0;
++        should_post = surface->requested.serial == 0;
+         initial_configure = surface->current.serial == 0;
+         surface->pending.serial = serial;
+         surface->requested = surface->pending;
+         memset(&surface->pending, 0, sizeof(surface->pending));
+-        if (should_post) NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
+     }
+ 
+     pthread_mutex_unlock(&surface->mutex);
+ 
++    if (should_post) NtUserPostMessage(hwnd, WM_WAYLAND_CONFIGURE, 0, 0);
++
+     /* Flush the window surface in case there is content that we weren't
+      * able to flush before due to the lack of the initial configure. */
+     if (initial_configure) wayland_window_flush(hwnd);
+-- 
+2.45.2
+
