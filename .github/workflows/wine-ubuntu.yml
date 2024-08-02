@@ -46,7 +46,6 @@ jobs:
           sudo aptitude remove -y '?narrow(?installed,?version(deb.sury.org))'
           cd wine-tkg-git 
           sed -i 's/distro=""/distro="debuntu"/' customization.cfg
-          sed -i 's/_LOCAL_PRESET=""/_LOCAL_PRESET="default-tkg"/' customization.cfg
           sed -i 's/_NOLIB32="false"/_NOLIB32="wow64"/' wine-tkg-profiles/advanced-customization.cfg
           sed -i 's/_PKGNAME_OVERRIDE=""/_PKGNAME_OVERRIDE="affinity"/' wine-tkg-profiles/advanced-customization.cfg
           echo '_ci_build="true"' >> customization.cfg
