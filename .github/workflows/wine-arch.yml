@@ -22,11 +22,11 @@ jobs:
             opencl.mypatch
             wintypes.mypatch
           sparse-checkout-cone-mode: false
-      - name: Download extra patches
-        run: |
-          curl https://gitlab.winehq.org/wine/wine/-/merge_requests/6107.patch -o wine-tkg-git/wine-tkg-userpatches/childwindows-vkgl-wayland.mypatch
-          curl https://gitlab.winehq.org/wine/wine/-/merge_requests/5573.patch -o wine-tkg-git/wine-tkg-userpatches/childwindows-vkx11.mypatch
-          curl https://gitlab.winehq.org/wine/wine/-/merge_requests/6025.patch -o wine-tkg-git/wine-tkg-userpatches/transparent-windows.mypatch
+      # - name: Download extra patches
+      #   run: |
+      #     curl https://gitlab.winehq.org/wine/wine/-/merge_requests/6107.patch -o wine-tkg-git/wine-tkg-userpatches/childwindows-vkgl-wayland.mypatch
+      #     curl https://gitlab.winehq.org/wine/wine/-/merge_requests/5573.patch -o wine-tkg-git/wine-tkg-userpatches/childwindows-vkx11.mypatch
+      #     curl https://gitlab.winehq.org/wine/wine/-/merge_requests/6025.patch -o wine-tkg-git/wine-tkg-userpatches/transparent-windows.mypatch
       - name: Cache wine-git
         id: cache-wine-git
         uses: actions/cache@v4
