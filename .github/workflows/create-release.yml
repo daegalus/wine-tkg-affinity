@@ -39,8 +39,8 @@ jobs:
       - name: Rename Artifact (fedora)
         run: mv artifacts/fedora/wine* artifacts/fedora/wine-tkg-affinity-fedora.tar
 
-      - name: Compress with xz (arch)
-        run: xz artifacts/arch/wine-tkg-affinity-arch.tar
+      - name: Compress with xz (fedora)
+        run: xz artifacts/fedora/wine-tkg-affinity-fedora.tar
 
 
       # - name: Download Artifact (ubuntu)
