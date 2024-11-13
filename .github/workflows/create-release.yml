@@ -20,8 +20,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wine-tkg-affinity-arch
+          repository: daegalus/wine-tkg-affinity
           path: artifacts/arch
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.WORKFLOW_GH_PAT }}
 
       - name: Rename Artifact (arch)
         run: mv artifacts/arch/wine* artifacts/arch/wine-tkg-affinity-arch.tar
@@ -33,8 +34,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wine-tkg-affinity-fedora
+          repository: daegalus/wine-tkg-affinity
           path: artifacts/fedora
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.WORKFLOW_GH_PAT }}
 
       - name: Rename Artifact (fedora)
         run: mv artifacts/fedora/wine* artifacts/fedora/wine-tkg-affinity-fedora.tar
