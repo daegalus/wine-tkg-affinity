@@ -51,8 +51,10 @@ jobs:
           echo '_ci_build="true"' >> customization.cfg
           touch tarplz
           yes|./non-makepkg-build.sh
+          ls -l ./non-makepkg-builds
+
       - name: Archive the artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wine-tkg-build
+          name: wine-tkg-affinity-fedora
           path: wine-tkg-git/non-makepkg-builds
