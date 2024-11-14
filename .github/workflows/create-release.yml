@@ -16,6 +16,9 @@ jobs:
         id: download-earthdate
         run: wget -O earthdate https://github.com/daegalus/earthdate/releases/latest/download/earthdate-linux-x86_64
 
+      - name: Fix Permissions
+        run: chmod +x earthdate
+
       - name: Get earthdate
         id: earthdate
         run: echo "earthdate=$(./earthdate)" >> $GITHUB_OUTPUT
