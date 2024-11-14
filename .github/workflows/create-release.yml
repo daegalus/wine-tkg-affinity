@@ -12,17 +12,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get current date
-        id: date
-        run: echo "date=$(date +'%Y%m%d-%H%m')" >> $GITHUB_OUTPUT
+      - name: Download Earthdate
+        id: download-earthdate
+        run: wget -O earthdate https://github.com/daegalus/earthdate/releases/latest/download/earthdate-linux-x86_64
 
-      - name: Get metric time
-        id: metric_time
-        run: echo "metric_time=$(printf "%.f" $(($(date -d "1970-01-01 UTC $(date +%T)" +%s) / 86.4)))" >> $GITHUB_OUTPUT
+      - name: Fix Permissions
+        run: chmod +x earthdate
 
       - name: Get earthdate
         id: earthdate
-        run: echo "earthdate=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+        run: echo "earthdate=$(./earthdate)" >> $GITHUB_OUTPUT
+
       - name: Download Artifact (arch)
         id: download-artifact-arch
         uses: dawidd6/action-download-artifact@v6
@@ -43,7 +43,10 @@ jobs:
           path: artifacts
 
       - name: Rename Artifact (fedora)
-        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedora.tar.zst
+        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedora.tar
+
+      - name: Compress Artifact (fedora)
+        run: zstd artifacts/wine-tkg-affinity-fedora.tar
 
       # - name: Download Artifact (ubuntu)
       #   id: download-artifact-ubuntu
@@ -60,8 +63,8 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.date.outputs.date }}
-          tag_name: ${{ steps.date.outputs.date }}
+          name: ${{ steps.earthdate.outputs.earthdate }}
+          tag_name: ${{ steps.earthdate.outputs.earthdate }}
           files: |
             artifacts/wine-tkg-affinity-arch.tar.zst
             artifacts/wine-tkg-affinity-fedora.tar.zst
