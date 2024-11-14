@@ -14,7 +14,7 @@ jobs:
 
       - name: Download Earthdate
         id: download-earthdate
-        run: wget -O earthdate https://github.com/daegalus/earthdate/releases/latest/download/earthdate_linux_x86_64
+        run: wget -O earthdate https://github.com/daegalus/earthdate/releases/latest/download/earthdate-linux-x86_64
 
       - name: Get earthdate
         id: earthdate
