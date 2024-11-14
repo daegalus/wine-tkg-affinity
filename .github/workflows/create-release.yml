@@ -16,56 +16,39 @@ jobs:
         id: date
         run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
 
-      - name: Download artifact test
-        id: download-artifact
+      - name: Download Artifact (arch)
+        id: download-artifact-arch
         uses: dawidd6/action-download-artifact@v6
         with:
-          # Optional, GitHub token, a Personal Access Token with `public_repo` scope if needed
-          # Required, if the artifact is from a different repo
-          # Required, if the repo is private a Personal Access Token with `repo` scope is needed or GitHub token in a job where the permissions `action` scope set to `read`
           github_token: ${{secrets.WORKFLOW_GH_PAT}}
-          # Optional, workflow file name or ID
-          # If not specified, will be inferred from run_id (if run_id is specified), or will be the current workflow
           workflow: wine-arch.yml
-          path: artifacts/arch
-      
-      - name: List files
-        run: ls -l artifacts/arch
-
-      - name: Download Artifact (arch)
-        uses: actions/download-artifact@v4
-        with:
-          name: wine-tkg-affinity-arch
-          repository: daegalus/wine-tkg-affinity
-          path: artifacts/arch
-          github-token: ${{ secrets.WORKFLOW_GH_PAT }}
+          path: artifacts
 
       - name: Rename Artifact (arch)
-        run: mv artifacts/arch/wine* artifacts/arch/wine-tkg-affinity-arch.tar
-
-      - name: Compress with xz (arch)
-        run: xz artifacts/arch/wine-tkg-affinity-arch.tar
+        run: mv artifacts/wine-tkg-affinity-arch/wine* artifacts/wine-tkg-affinity-arch.tar.zst
 
       - name: Download Artifact (fedora)
-        uses: actions/download-artifact@v4
+        id: download-artifact-fedora
+        uses: dawidd6/action-download-artifact@v6
         with:
-          name: wine-tkg-affinity-fedora
-          repository: daegalus/wine-tkg-affinity
-          path: artifacts/fedora
-          github-token: ${{ secrets.WORKFLOW_GH_PAT }}
+          github_token: ${{secrets.WORKFLOW_GH_PAT}}
+          workflow: wine-fedora.yml
+          path: artifacts
 
       - name: Rename Artifact (fedora)
-        run: mv artifacts/fedora/wine* artifacts/fedora/wine-tkg-affinity-fedora.tar
-
-      - name: Compress with xz (fedora)
-        run: xz artifacts/fedora/wine-tkg-affinity-fedora.tar
-
+        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedora.tar.zst
 
       # - name: Download Artifact (ubuntu)
-      #   uses: actions/download-artifact@v2
+      #   id: download-artifact-ubuntu
+      #   uses: dawidd6/action-download-artifact@v6
       #   with:
-      #     name: wine-tkg-affinity-ubuntu
-      #     github-token: 
+      #     github_token: ${{secrets.WORKFLOW_GH_PAT}}
+      #     workflow: wine-ubuntu.yml
+      #     path: artifacts
+
+      # - name: Rename Artifact (ubuntu)
+      #   run: mv artifacts/wine-tkg-affinity-ubuntu/wine* artifacts/wine-tkg-affinity-ubuntu.tar.zst
+
 
       - name: Release
         uses: softprops/action-gh-release@v2
@@ -73,5 +56,6 @@ jobs:
           name: ${{ steps.date.outputs.date }}
           tag_name: ${{ steps.date.outputs.date }}
           files: |
-            artifacts/arch/wine-tkg-affinity-arch.tar.xz
-            artifacts/arch/wine-tkg-affinity-fedora.tar.xz
+            artifacts/wine-tkg-affinity-arch.tar.zst
+            artifacts/wine-tkg-affinity-fedora.tar.zst
+            
