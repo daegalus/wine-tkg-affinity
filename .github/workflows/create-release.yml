@@ -14,8 +14,15 @@ jobs:
 
       - name: Get current date
         id: date
-        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+        run: echo "date=$(date +'%Y%m%d-%H%m')" >> $GITHUB_OUTPUT
 
+      - name: Get metric time
+        id: metric_time
+        run: echo "metric_time=$(printf "%.f" $(($(date -d "1970-01-01 UTC $(date +%T)" +%s) / 86.4)))" >> $GITHUB_OUTPUT
+
+      - name: Get earthdate
+        id: earthdate
+        run: echo "earthdate=$(date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
       - name: Download Artifact (arch)
         id: download-artifact-arch
         uses: dawidd6/action-download-artifact@v6
@@ -58,4 +65,3 @@ jobs:
           files: |
             artifacts/wine-tkg-affinity-arch.tar.zst
             artifacts/wine-tkg-affinity-fedora.tar.zst
-            
