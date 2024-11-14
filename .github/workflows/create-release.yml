@@ -40,7 +40,10 @@ jobs:
           path: artifacts
 
       - name: Rename Artifact (fedora)
-        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedora.tar.zst
+        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedora.tar
+
+      - name: Compress Artifact (fedora)
+        run: zstd artifacts/wine-tkg-affinity-fedora.tar
 
       # - name: Download Artifact (ubuntu)
       #   id: download-artifact-ubuntu
