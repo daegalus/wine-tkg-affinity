@@ -2,6 +2,8 @@
 
 You must be logged in to GitHub in order to download Wine or Proton nightly builds.
 
+**NOTE: The packages in the release downloads should work on any Linux distro, the `archbuilt` and `fedorabuilt` labeling is primarily that it was built on those distros, not that is specific to those. I release multiple because in the event one doesn't work, the other might. But in general, anyone can use any of the releases in a perfect world.**
+
 ## Affinity
 
 This particular repo is a fork of the wine-tkg-git builder to generate builds with patches for Affinity software by Serif.
@@ -11,6 +13,10 @@ If you wish to contribute, please contribute to `tkg` (FUNDING yaml is unchanged
 If after you contributed, or supported those projects, you still want to support me, you can hit up my [Ko-fi page](https://ko-fi.com/yulian).
 
 To get builds, please go to the Actions tab, select the build you want, and download the artifact.
+
+
+---
+_**Original Readme**_
 
 ## Wine nightly builds
 
