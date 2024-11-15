@@ -32,7 +32,7 @@ jobs:
           path: artifacts
 
       - name: Rename Artifact (arch)
-        run: mv artifacts/wine-tkg-affinity-arch/wine* artifacts/wine-tkg-affinity-arch.tar.zst
+        run: mv artifacts/wine-tkg-affinity-arch/wine* artifacts/wine-tkg-affinity-archbuilt.tar.zst
 
       - name: Download Artifact (fedora)
         id: download-artifact-fedora
@@ -43,10 +43,10 @@ jobs:
           path: artifacts
 
       - name: Rename Artifact (fedora)
-        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedora.tar
+        run: mv artifacts/wine-tkg-affinity-fedora/wine* artifacts/wine-tkg-affinity-fedorabuilt.tar
 
       - name: Compress Artifact (fedora)
-        run: zstd artifacts/wine-tkg-affinity-fedora.tar
+        run: zstd artifacts/wine-tkg-affinity-fedorabuilt.tar
 
       # - name: Download Artifact (ubuntu)
       #   id: download-artifact-ubuntu
@@ -66,5 +66,5 @@ jobs:
           name: ${{ steps.earthdate.outputs.earthdate }}
           tag_name: ${{ steps.earthdate.outputs.earthdate }}
           files: |
-            artifacts/wine-tkg-affinity-arch.tar.zst
-            artifacts/wine-tkg-affinity-fedora.tar.zst
+            artifacts/wine-tkg-affinity-archbuilt.tar.zst
+            artifacts/wine-tkg-affinity-fedorabuilt.tar.zst
