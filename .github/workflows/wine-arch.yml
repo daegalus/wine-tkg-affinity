@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Delete userpatches folder
-        run: rm -rf wine-tkg-git/wine-tkg-userpatches
+        run: rm wine-tkg-git/wine-tkg-userpatches/README.md
       # - uses: actions/checkout@v4
       #   name: Checkout affinity patches
       #   with:
@@ -22,6 +22,8 @@ jobs:
       #       opencl.mypatch
       #       wintypes.mypatch
       #     sparse-checkout-cone-mode: false
+      - name: Copy Patches
+        run: cp -r wine-tkg-git/custom-patches/* wine-tkg-git/wine-tkg-userpatches
       - name: Cache wine-git
         id: cache-wine-git
         uses: actions/cache@v4
