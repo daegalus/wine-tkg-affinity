@@ -12,21 +12,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Delete userpatches folder
         run: rm -rf wine-tkg-git/wine-tkg-userpatches
-      - uses: actions/checkout@v4
-        name: Checkout affinity patches
-        with:
-          repository: oh-ok/wine-affinity-patches
-          path: wine-tkg-git/wine-tkg-userpatches
-          sparse-checkout: |
-            dxcore.mypatch
-            opencl.mypatch
-            wintypes.mypatch
-          sparse-checkout-cone-mode: false
-      # - name: Download extra patches
-      #   run: |
-      #     curl https://gitlab.winehq.org/wine/wine/-/merge_requests/6107.patch -o wine-tkg-git/wine-tkg-userpatches/childwindows-vkgl-wayland.mypatch
-      #     curl https://gitlab.winehq.org/wine/wine/-/merge_requests/5573.patch -o wine-tkg-git/wine-tkg-userpatches/childwindows-vkx11.mypatch
-      #     curl https://gitlab.winehq.org/wine/wine/-/merge_requests/6025.patch -o wine-tkg-git/wine-tkg-userpatches/transparent-windows.mypatch
+      # - uses: actions/checkout@v4
+      #   name: Checkout affinity patches
+      #   with:
+      #     repository: oh-ok/wine-affinity-patches
+      #     path: wine-tkg-git/wine-tkg-userpatches
+      #     sparse-checkout: |
+      #       dxcore.mypatch
+      #       opencl.mypatch
+      #       wintypes.mypatch
+      #     sparse-checkout-cone-mode: false
       - name: Copy Patches
         run: cp -r wine-tkg-git/custom-patches/* wine-tkg-git/wine-tkg-userpatches
       - name: Cache wine-git
