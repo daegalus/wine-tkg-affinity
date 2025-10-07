@@ -1,3 +1,2380 @@
+diff --git b/dlls/win32u/dce.c a/dlls/win32u/dce.c
+index 6ba5f1c7c44..1eb966d3fca 100644
+--- b/dlls/win32u/dce.c
++++ a/dlls/win32u/dce.c
+@@ -1803,7 +1803,7 @@ BOOL WINAPI NtUserRedrawWindow( HWND hwnd, const RECT *rect, HRGN hrgn, UINT fla
+     }
+ 
+     /* process pending expose events before painting */
+-    if (flags & RDW_UPDATENOW) process_driver_events( QS_PAINT );
++    if (flags & RDW_UPDATENOW) user_driver->pProcessEvents( QS_PAINT );
+ 
+     if (rect && !hrgn)
+     {
+diff --git b/dlls/win32u/input.c a/dlls/win32u/input.c
+index 9668d70b040..c718bd1cbbc 100644
+--- b/dlls/win32u/input.c
++++ a/dlls/win32u/input.c
+@@ -787,6 +787,21 @@ BOOL WINAPI NtUserGetCursorInfo( CURSORINFO *info )
+     return TRUE;
+ }
+ 
++static void check_for_events( UINT flags )
++{
++    struct peek_message_filter filter =
++    {
++        .internal = TRUE,
++        .flags = PM_REMOVE,
++    };
++    MSG msg;
++
++    if (!user_driver->pProcessEvents( flags ))
++        flush_window_surfaces( TRUE );
++
++    peek_message( &msg, &filter );
++}
++
+ /**********************************************************************
+  *           GetAsyncKeyState (win32u.@)
+  */
+diff --git b/dlls/win32u/message.c a/dlls/win32u/message.c
+index dc316922581..df64e059177 100644
+--- b/dlls/win32u/message.c
++++ a/dlls/win32u/message.c
+@@ -83,16 +83,6 @@ static UINT64 get_tick_count(void)
+ 
+ #define MAX_PACK_COUNT 4
+ 
+-struct peek_message_filter
+-{
+-    HWND hwnd;
+-    UINT first;
+-    UINT last;
+-    UINT mask;
+-    UINT flags;
+-    BOOL internal;
+-};
+-
+ /* info about the message currently being received by the current thread */
+ struct received_message_info
+ {
+@@ -2828,7 +2818,7 @@ static BOOL check_queue_bits( UINT wake_mask, UINT changed_mask, UINT signal_bit
+  * available; -1 on error.
+  * All pending sent messages are processed before returning.
+  */
+-static int peek_message( MSG *msg, const struct peek_message_filter *filter )
++int peek_message( MSG *msg, const struct peek_message_filter *filter )
+ {
+     LRESULT result;
+     HWND hwnd = filter->hwnd;
+@@ -3164,20 +3154,6 @@ static HANDLE get_server_queue_handle(void)
+     return ret;
+ }
+ 
+-BOOL process_driver_events( UINT mask )
+-{
+-    return user_driver->pProcessEvents( mask );
+-}
+-
+-void check_for_events( UINT flags )
+-{
+-    struct peek_message_filter filter = {.internal = TRUE, .flags = PM_REMOVE};
+-    MSG msg;
+-
+-    if (!process_driver_events( flags )) flush_window_surfaces( TRUE );
+-    peek_message( &msg, &filter );
+-}
+-
+ /* monotonic timer tick for throttling driver event checks */
+ static inline LONGLONG get_driver_check_time(void)
+ {
+@@ -3192,7 +3168,7 @@ static inline void check_for_driver_events(void)
+     if (get_user_thread_info()->last_driver_time != get_driver_check_time())
+     {
+         flush_window_surfaces( FALSE );
+-        process_driver_events( QS_ALLINPUT );
++        user_driver->pProcessEvents( QS_ALLINPUT );
+         get_user_thread_info()->last_driver_time = get_driver_check_time();
+     }
+ }
+@@ -3221,12 +3197,12 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
+         params.restore = TRUE;
+     }
+ 
+-    if (process_driver_events( QS_ALLINPUT )) ret = count - 1;
++    if (user_driver->pProcessEvents( mask )) ret = count - 1;
+     else
+     {
+         ret = NtWaitForMultipleObjects( count, handles, !(flags & MWMO_WAITALL),
+                                         !!(flags & MWMO_ALERTABLE), get_nt_timeout( &time, timeout ));
+-        if (ret == count - 1) process_driver_events( QS_ALLINPUT );
++        if (ret == count - 1) user_driver->pProcessEvents( mask );
+         else if (HIWORD(ret)) /* is it an error code? */
+         {
+             RtlSetLastWin32Error( RtlNtStatusToDosError(ret) );
+diff --git b/dlls/win32u/ntuser_private.h a/dlls/win32u/ntuser_private.h
+index 5e6e6d36cae..2de11465f87 100644
+--- b/dlls/win32u/ntuser_private.h
++++ a/dlls/win32u/ntuser_private.h
+@@ -201,8 +201,17 @@ extern void free_dce( struct dce *dce, HWND hwnd );
+ extern void invalidate_dce( WND *win, const RECT *old_rect );
+ 
+ /* message.c */
+-extern BOOL process_driver_events( UINT mask );
+-extern void check_for_events( UINT flags );
++struct peek_message_filter
++{
++    HWND hwnd;
++    UINT first;
++    UINT last;
++    UINT mask;
++    UINT flags;
++    BOOL internal;
++};
++
++extern int peek_message( MSG *msg, const struct peek_message_filter *filter );
+ 
+ /* systray.c */
+ extern LRESULT system_tray_call( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, void *data );
+diff --git b/include/wine/server_protocol.h a/include/wine/server_protocol.h
+index bbad2441877..5f63e12f70d 100644
+--- b/include/wine/server_protocol.h
++++ a/include/wine/server_protocol.h
+@@ -1001,7 +1001,6 @@ typedef volatile struct
+     unsigned int         wake_bits;
+     unsigned int         changed_mask;
+     unsigned int         changed_bits;
+-    unsigned int         internal_bits;
+     int                  hooks_count[NB_HOOKS];
+ } queue_shm_t;
+ 
+@@ -6995,6 +6994,6 @@ union generic_reply
+     struct d3dkmt_object_open_name_reply d3dkmt_object_open_name_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 915
++#define SERVER_PROTOCOL_VERSION 914
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git b/server/protocol.def a/server/protocol.def
+index e0bd2ee5a07..6013cbf8841 100644
+--- b/server/protocol.def
++++ a/server/protocol.def
+@@ -1017,7 +1017,6 @@ typedef volatile struct
+     unsigned int         wake_bits;        /* wakeup bits */
+     unsigned int         changed_mask;     /* changed wakeup mask */
+     unsigned int         changed_bits;     /* changed wakeup bits */
+-    unsigned int         internal_bits;    /* internal queue bits */
+     int                  hooks_count[NB_HOOKS];  /* active hooks count */
+ } queue_shm_t;
+ 
+diff --git b/server/queue.c a/server/queue.c
+index ffb1d441e60..268c921a914 100644
+--- b/server/queue.c
++++ a/server/queue.c
+@@ -46,9 +46,6 @@
+ #include "request.h"
+ #include "user.h"
+ 
+-#define QS_DRIVER       0x80000000
+-#define QS_INTERNAL     QS_DRIVER
+-
+ #define WM_NCMOUSEFIRST WM_NCMOUSEMOVE
+ #define WM_NCMOUSELAST  (WM_NCMOUSEFIRST+(WM_MOUSELAST-WM_MOUSEFIRST))
+ 
+@@ -154,6 +151,7 @@ static void msg_queue_dump( struct object *obj, int verbose );
+ static int msg_queue_add_queue( struct object *obj, struct wait_queue_entry *entry );
+ static void msg_queue_remove_queue( struct object *obj, struct wait_queue_entry *entry );
+ static int msg_queue_signaled( struct object *obj, struct wait_queue_entry *entry );
++static void msg_queue_satisfied( struct object *obj, struct wait_queue_entry *entry );
+ static void msg_queue_destroy( struct object *obj );
+ static void msg_queue_poll_event( struct fd *fd, int event );
+ static void thread_input_dump( struct object *obj, int verbose );
+@@ -168,7 +166,7 @@ static const struct object_ops msg_queue_ops =
+     msg_queue_add_queue,       /* add_queue */
+     msg_queue_remove_queue,    /* remove_queue */
+     msg_queue_signaled,        /* signaled */
+-    no_satisfied,              /* satisfied */
++    msg_queue_satisfied,       /* satisfied */
+     no_signal,                 /* signal */
+     no_get_fd,                 /* get_fd */
+     default_get_sync,          /* get_sync */
+@@ -337,7 +335,6 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+             shared->wake_bits = 0;
+             shared->changed_mask = 0;
+             shared->changed_bits = 0;
+-            shared->internal_bits = 0;
+         }
+         SHARED_WRITE_END;
+ 
+@@ -733,18 +730,15 @@ static inline int get_queue_status( struct msg_queue *queue )
+ {
+     queue_shm_t *queue_shm = queue->shared;
+     return (queue_shm->wake_bits & queue_shm->wake_mask) ||
+-           (queue_shm->changed_bits & queue_shm->changed_mask) ||
+-            queue_shm->internal_bits;
++           (queue_shm->changed_bits & queue_shm->changed_mask);
+ }
+ 
+ /* set some queue bits */
+ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
+ {
+     queue_shm_t *queue_shm = queue->shared;
+-    unsigned int internal = bits & QS_INTERNAL;
+-    bits &= ~QS_INTERNAL;
+ 
+-    if (!internal && (bits & (QS_KEY | QS_MOUSEBUTTON)))
++    if (bits & (QS_KEY | QS_MOUSEBUTTON))
+     {
+         if (!queue->keystate_lock) lock_input_keystate( queue->input );
+         queue->keystate_lock = 1;
+@@ -754,7 +748,6 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
+     {
+         shared->wake_bits |= bits;
+         shared->changed_bits |= bits;
+-        shared->internal_bits |= internal;
+     }
+     SHARED_WRITE_END;
+ 
+@@ -765,19 +758,15 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
+ static inline void clear_queue_bits( struct msg_queue *queue, unsigned int bits )
+ {
+     queue_shm_t *queue_shm = queue->shared;
+-    unsigned int internal = bits & QS_INTERNAL;
+-    bits &= ~QS_INTERNAL;
+ 
+     SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
+     {
+         shared->wake_bits &= ~bits;
+         shared->changed_bits &= ~bits;
+-        shared->internal_bits &= ~internal;
+-        bits = shared->wake_bits;
+     }
+     SHARED_WRITE_END;
+ 
+-    if (!internal && !(bits & (QS_KEY | QS_MOUSEBUTTON)))
++    if (!(queue_shm->wake_bits & (QS_KEY | QS_MOUSEBUTTON)))
+     {
+         if (queue->keystate_lock) unlock_input_keystate( queue->input );
+         queue->keystate_lock = 0;
+@@ -1309,13 +1298,8 @@ static int msg_queue_add_queue( struct object *obj, struct wait_queue_entry *ent
+ 
+     if (queue->fd)
+     {
+-        if (check_fd_events( queue->fd, POLLIN ))
+-            set_queue_bits( queue, QS_DRIVER );
+-        else
+-        {
+-            clear_queue_bits( queue, QS_DRIVER );
+-            set_fd_events( queue->fd, POLLIN );
+-        }
++        if (check_fd_events( queue->fd, POLLIN )) signal_queue_sync( queue );
++        else set_fd_events( queue->fd, POLLIN );
+     }
+     add_queue( obj, entry );
+     return 1;
+@@ -1326,12 +1310,7 @@ static void msg_queue_remove_queue(struct object *obj, struct wait_queue_entry *
+     struct msg_queue *queue = (struct msg_queue *)obj;
+ 
+     remove_queue( obj, entry );
+-    if (queue->fd)
+-    {
+-        /* after waiting, assume that all events will be processed */
+-        clear_queue_bits( queue, QS_DRIVER );
+-        set_fd_events( queue->fd, 0 );
+-    }
++    if (queue->fd) set_fd_events( queue->fd, 0 );
+ }
+ 
+ static void msg_queue_dump( struct object *obj, int verbose )
+@@ -1349,6 +1328,12 @@ static int msg_queue_signaled( struct object *obj, struct wait_queue_entry *entr
+     return queue->signaled;
+ }
+ 
++static void msg_queue_satisfied( struct object *obj, struct wait_queue_entry *entry )
++{
++    struct msg_queue *queue = (struct msg_queue *)obj;
++    reset_queue_sync( queue );
++}
++
+ static void msg_queue_destroy( struct object *obj )
+ {
+     struct msg_queue *queue = (struct msg_queue *)obj;
+@@ -1402,7 +1387,7 @@ static void msg_queue_poll_event( struct fd *fd, int event )
+ 
+     if (event & (POLLERR | POLLHUP)) set_fd_events( fd, -1 );
+     else set_fd_events( queue->fd, 0 );
+-    set_queue_bits( queue, QS_DRIVER );
++    signal_queue_sync( queue );
+ }
+ 
+ static void thread_input_dump( struct object *obj, int verbose )
+@@ -3451,8 +3436,7 @@ DECL_HANDLER(get_message)
+     }
+     SHARED_WRITE_END;
+ 
+-    if (!get_queue_status( queue )) reset_queue_sync( queue );
+-    else signal_queue_sync( queue );
++    reset_queue_sync( queue );
+     set_error( STATUS_PENDING );  /* FIXME */
+ }
+ 
+
+diff --git b/server/thread.c a/server/thread.c
+index 853aff4cc84..fba1f69d284 100644
+--- b/server/thread.c
++++ a/server/thread.c
+@@ -397,7 +397,6 @@ static inline void init_thread_structure( struct thread *thread )
+     int i;
+ 
+     thread->sync            = NULL;
+-    thread->alert_sync      = NULL;
+     thread->unix_pid        = -1;  /* not known yet */
+     thread->unix_tid        = -1;  /* not known yet */
+     thread->context         = NULL;
+@@ -561,7 +560,6 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
+     }
+     if (!(thread->request_fd = create_anonymous_fd( &thread_fd_ops, fd, &thread->obj, 0 ))) goto error;
+     if (!(thread->sync = create_event_sync( 1, 0 ))) goto error;
+-    if (get_inproc_device_fd() >= 0 && !(thread->alert_sync = create_inproc_internal_sync( 1, 0 ))) goto error;
+ 
+     if (process->desktop)
+     {
+@@ -656,7 +654,6 @@ static void destroy_thread( struct object *obj )
+     release_object( thread->process );
+     if (thread->id) free_ptid( thread->id );
+     if (thread->token) release_object( thread->token );
+-    if (thread->alert_sync) release_object( thread->alert_sync );
+     if (thread->sync) release_object( thread->sync );
+ }
+ 
+@@ -1443,11 +1440,7 @@ static int queue_apc( struct process *process, struct thread *thread, struct thr
+     grab_object( apc );
+     list_add_tail( queue, &apc->entry );
+     if (!list_prev( queue, &apc->entry ))  /* first one */
+-    {
+-        if (apc->call.type == APC_USER && thread->alert_sync)
+-            signal_inproc_sync( thread->alert_sync );
+         wake_thread( thread );
+-    }
+ 
+     return 1;
+ }
+@@ -1479,8 +1472,6 @@ void thread_cancel_apc( struct thread *thread, struct object *owner, enum apc_ty
+         apc->executed = 1;
+         signal_sync( apc->sync );
+         release_object( apc );
+-        if (list_empty( &thread->user_apc ) && thread->alert_sync)
+-            reset_inproc_sync( thread->alert_sync );
+         return;
+     }
+ }
+@@ -1495,8 +1486,6 @@ static struct thread_apc *thread_dequeue_apc( struct thread *thread, int system
+     {
+         apc = LIST_ENTRY( ptr, struct thread_apc, entry );
+         list_remove( ptr );
+-        if (list_empty( &thread->user_apc ) && thread->alert_sync)
+-            reset_inproc_sync( thread->alert_sync );
+     }
+     return apc;
+ }
+diff --git b/server/thread.h a/server/thread.h
+index 9c552a88ed2..1418e4c5039 100644
+--- b/server/thread.h
++++ a/server/thread.h
+@@ -51,7 +51,6 @@ struct thread
+ {
+     struct object          obj;           /* object header */
+     struct event_sync     *sync;          /* sync object for wait/signal */
+-    struct inproc_sync    *alert_sync;    /* inproc sync for user apc alerts */
+     struct list            entry;         /* entry in system-wide thread list */
+     struct list            proc_entry;    /* entry in per-process thread list */
+     struct list            desktop_entry; /* entry in per-desktop thread list */
+
+diff --git b/dlls/ntdll/unix/server.c a/dlls/ntdll/unix/server.c
+index bbca17aee8f..d44b4b90f3d 100644
+--- b/dlls/ntdll/unix/server.c
++++ a/dlls/ntdll/unix/server.c
+@@ -818,21 +818,6 @@ unsigned int server_wait( const union select_op *select_op, data_size_t size, UI
+ }
+ 
+ 
+-/* helper function to perform a server-side wait on an internal handle without
+- * using the fast synchronization path */
+-unsigned int server_wait_for_object( HANDLE handle, BOOL alertable, const LARGE_INTEGER *timeout )
+-{
+-    union select_op select_op;
+-    UINT flags = SELECT_INTERRUPTIBLE;
+-
+-    if (alertable) flags |= SELECT_ALERTABLE;
+-
+-    select_op.wait.op = SELECT_WAIT;
+-    select_op.wait.handles[0] = wine_server_obj_handle( handle );
+-    return server_wait( &select_op, offsetof( union select_op, wait.handles[1] ), flags, timeout );
+-}
+-
+-
+ /***********************************************************************
+  *              NtContinue  (NTDLL.@)
+  */
+diff --git b/dlls/ntdll/unix/sync.c a/dlls/ntdll/unix/sync.c
+index dd18c948d22..9ba56490c33 100644
+--- b/dlls/ntdll/unix/sync.c
++++ a/dlls/ntdll/unix/sync.c
+@@ -2328,7 +2328,7 @@ NTSTATUS WINAPI NtRemoveIoCompletion( HANDLE handle, ULONG_PTR *key, ULONG_PTR *
+     }
+     SERVER_END_REQ;
+     if (status != STATUS_PENDING) return status;
+-    if (!timeout || timeout->QuadPart) status = server_wait_for_object( wait_handle, FALSE, timeout );
++    if (!timeout || timeout->QuadPart) status = NtWaitForSingleObject( wait_handle, FALSE, timeout );
+     else                               status = STATUS_TIMEOUT;
+     if (status != WAIT_OBJECT_0) return status;
+ 
+@@ -2392,7 +2392,7 @@ NTSTATUS WINAPI NtRemoveIoCompletionEx( HANDLE handle, FILE_IO_COMPLETION_INFORM
+         assert( status == STATUS_USER_APC );
+         goto done;
+     }
+-    if (!timeout || timeout->QuadPart) status = server_wait_for_object( wait_handle, alertable, timeout );
++    if (!timeout || timeout->QuadPart) status = NtWaitForSingleObject( wait_handle, alertable, timeout );
+     else                               status = STATUS_TIMEOUT;
+     if (status != WAIT_OBJECT_0) goto done;
+ 
+diff --git b/dlls/ntdll/unix/unix_private.h a/dlls/ntdll/unix/unix_private.h
+index 75c04e5ec15..f514f61dd60 100644
+--- b/dlls/ntdll/unix/unix_private.h
++++ a/dlls/ntdll/unix/unix_private.h
+@@ -227,7 +227,6 @@ extern unsigned int server_select( const union select_op *select_op, data_size_t
+                                    timeout_t abs_timeout, struct context_data *context, struct user_apc *user_apc );
+ extern unsigned int server_wait( const union select_op *select_op, data_size_t size, UINT flags,
+                                  const LARGE_INTEGER *timeout );
+-extern unsigned int server_wait_for_object( HANDLE handle, BOOL alertable, const LARGE_INTEGER *timeout );
+ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_call *call,
+                                               union apc_result *result );
+ extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+@@ -468,7 +467,7 @@ static inline struct async_data server_async( HANDLE handle, struct async_fileio
+ 
+ static inline NTSTATUS wait_async( HANDLE handle, BOOL alertable )
+ {
+-    return server_wait_for_object( handle, alertable, NULL );
++    return NtWaitForSingleObject( handle, alertable, NULL );
+ }
+ 
+ static inline BOOL in_wow64_call(void)
+diff --git b/dlls/win32u/message.c a/dlls/win32u/message.c
+index df64e059177..d3ef83785bb 100644
+--- b/dlls/win32u/message.c
++++ a/dlls/win32u/message.c
+@@ -3229,10 +3229,7 @@ static BOOL check_queue_masks( UINT wake_mask, UINT changed_mask )
+     UINT status;
+ 
+     while ((status = get_shared_queue( &lock, &queue_shm )) == STATUS_PENDING)
+-    {
+-        if (queue_shm->wake_mask != wake_mask || queue_shm->changed_mask != changed_mask) skip = FALSE;
+-        else skip = get_tick_count() - (UINT64)queue_shm->access_time / 10000 < 3000; /* avoid hung queue */
+-    }
++        skip = queue_shm->wake_mask == wake_mask && queue_shm->changed_mask == changed_mask;
+ 
+     if (status) return FALSE;
+     return skip;
+diff --git b/server/queue.c a/server/queue.c
+index 268c921a914..3f06c15d006 100644
+--- b/server/queue.c
++++ a/server/queue.c
+@@ -134,6 +134,7 @@ struct msg_queue
+     struct thread_input   *input;           /* thread input descriptor */
+     struct hook_table     *hooks;           /* hook table */
+     int                    keystate_lock;   /* owns an input keystate lock */
++    int                    waiting;         /* is thread waiting on queue */
+     queue_shm_t           *shared;          /* queue in session shared memory */
+ };
+ 
+@@ -318,6 +319,7 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+         queue->hooks           = NULL;
+         queue->keystate_lock   = 0;
+         queue->ignore_post_msg = 0;
++        queue->waiting         = 0;
+ 
+         list_init( &queue->send_result );
+         list_init( &queue->callback_result );
+@@ -1281,8 +1283,26 @@ static void cleanup_results( struct msg_queue *queue )
+ /* check if the thread owning the queue is hung (not checking for messages) */
+ static int is_queue_hung( struct msg_queue *queue )
+ {
+-    /* queue is hung if it's signaled and thread didn't access it for more than 5 seconds */
+-    return queue->signaled && monotonic_time - queue->shared->access_time > 5 * TICKS_PER_SEC;
++    if (monotonic_time - queue->shared->access_time <= 5 * TICKS_PER_SEC)
++        return 0;  /* less than 5 seconds since last get message -> not hung */
++    return !queue->waiting;
++}
++
++static int msg_queue_select( struct msg_queue *queue, int events )
++{
++    if (queue->waiting == !!events)
++    {
++        set_error( STATUS_ACCESS_DENIED );
++        return 0;
++    }
++    queue->waiting = !!events;
++
++    if (queue->fd)
++    {
++        if (events && check_fd_events( queue->fd, POLLIN )) signal_queue_sync( queue );
++        else set_fd_events( queue->fd, events );
++    }
++    return 1;
+ }
+ 
+ static int msg_queue_add_queue( struct object *obj, struct wait_queue_entry *entry )
+@@ -1296,11 +1316,7 @@ static int msg_queue_add_queue( struct object *obj, struct wait_queue_entry *ent
+         return 0;
+     }
+ 
+-    if (queue->fd)
+-    {
+-        if (check_fd_events( queue->fd, POLLIN )) signal_queue_sync( queue );
+-        else set_fd_events( queue->fd, POLLIN );
+-    }
++    if (!msg_queue_select( queue, POLLIN )) return 0;
+     add_queue( obj, entry );
+     return 1;
+ }
+@@ -1310,7 +1326,7 @@ static void msg_queue_remove_queue(struct object *obj, struct wait_queue_entry *
+     struct msg_queue *queue = (struct msg_queue *)obj;
+ 
+     remove_queue( obj, entry );
+-    if (queue->fd) set_fd_events( queue->fd, 0 );
++    msg_queue_select( queue, 0 );
+ }
+ 
+ static void msg_queue_dump( struct object *obj, int verbose )
+@@ -3145,7 +3161,6 @@ DECL_HANDLER(set_queue_mask)
+ 
+     SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
+     {
+-        shared->access_time  = monotonic_time;
+         shared->wake_mask    = req->wake_mask;
+         shared->changed_mask = req->changed_mask;
+         reply->wake_bits     = shared->wake_bits;
+
+--- b/server/d3dkmt.c
++++ a/server/d3dkmt.c
+@@ -56,7 +56,6 @@
+     NULL,                           /* satisfied */
+     no_signal,                      /* signal */
+     no_get_fd,                      /* get_fd */
+-    default_get_sync,               /* get_sync */
+     default_map_access,             /* map_access */
+     default_get_sd,                 /* get_sd */
+     default_set_sd,                 /* set_sd */
+@@ -66,6 +65,7 @@
+     NULL,                           /* unlink_name */
+     no_open_file,                   /* open_file */
+     no_kernel_obj_list,             /* get_kernel_obj_list */
++    no_get_inproc_sync,             /* get_inproc_sync */
+     no_close_handle,                /* close_handle */
+     d3dkmt_object_destroy,          /* destroy */
+ };
+@@ -110,7 +110,6 @@
+     NULL,                               /* satisfied */
+     no_signal,                          /* signal */
+     no_get_fd,                          /* get_fd */
+-    default_get_sync,                   /* get_sync */
+     default_map_access,                 /* map_access */
+     default_get_sd,                     /* get_sd */
+     default_set_sd,                     /* set_sd */
+@@ -120,6 +119,7 @@
+     default_unlink_name,                /* unlink_name */
+     no_open_file,                       /* open_file */
+     no_kernel_obj_list,                 /* get_kernel_obj_list */
++    no_get_inproc_sync,             /* get_inproc_sync */
+     no_close_handle,                    /* close_handle */
+     dxgk_shared_sync_destroy,           /* destroy */
+ };
+@@ -177,7 +177,6 @@
+     NULL,                                   /* satisfied */
+     no_signal,                              /* signal */
+     no_get_fd,                              /* get_fd */
+-    default_get_sync,                       /* get_sync */
+     default_map_access,                     /* map_access */
+     default_get_sd,                         /* get_sd */
+     default_set_sd,                         /* set_sd */
+@@ -187,6 +186,7 @@
+     default_unlink_name,                    /* unlink_name */
+     no_open_file,                           /* open_file */
+     no_kernel_obj_list,                     /* get_kernel_obj_list */
++    no_get_inproc_sync,             /* get_inproc_sync */
+     no_close_handle,                        /* close_handle */
+     dxgk_shared_resource_destroy,           /* destroy */
+ };
+diff --git b/dlls/win32u/hook.c a/dlls/win32u/hook.c
+index b0f49e84b65..b1a154c6fb7 100644
+--- b/dlls/win32u/hook.c
++++ a/dlls/win32u/hook.c
+@@ -31,7 +31,9 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(hook);
+ 
+-static const char * const hook_names[NB_HOOKS] =
++#define WH_WINEVENT (WH_MAXHOOK+1)
++
++static const char * const hook_names[WH_WINEVENT - WH_MINHOOK + 1] =
+ {
+     "WH_MSGFILTER",
+     "WH_JOURNALRECORD",
+diff --git b/dlls/win32u/message.c a/dlls/win32u/message.c
+index d3ef83785bb..3a3f79a2ee8 100644
+--- b/dlls/win32u/message.c
++++ a/dlls/win32u/message.c
+@@ -27,8 +27,6 @@
+ #include <assert.h>
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+-#include "winternl.h"
+-#include "ddk/wdm.h"
+ #include "win32u_private.h"
+ #include "ntuser_private.h"
+ #include "winnls.h"
+@@ -42,40 +40,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(msg);
+ WINE_DECLARE_DEBUG_CHANNEL(key);
+ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
+-
+-static LONG atomic_load_long( const volatile LONG *ptr )
+-{
+-#if defined(__i386__) || defined(__x86_64__)
+-    return *ptr;
+-#else
+-    return __atomic_load_n( ptr, __ATOMIC_SEQ_CST );
+-#endif
+-}
+-
+-static ULONG atomic_load_ulong( const volatile ULONG *ptr )
+-{
+-#if defined(__i386__) || defined(__x86_64__)
+-    return *ptr;
+-#else
+-    return __atomic_load_n( ptr, __ATOMIC_SEQ_CST );
+-#endif
+-}
+-
+-static UINT64 get_tick_count(void)
+-{
+-    ULONG high, low;
+-
+-    do
+-    {
+-        high = atomic_load_long( &user_shared_data->TickCount.High1Time );
+-        low = atomic_load_ulong( &user_shared_data->TickCount.LowPart );
+-    }
+-    while (high != atomic_load_long( &user_shared_data->TickCount.High2Time ));
+-    /* note: we ignore TickCountMultiplier */
+-    return (UINT64)high << 32 | low;
+-}
+-
+ #define MAX_WINPROC_RECURSION  64
+ 
+ #define WM_NCMOUSEFIRST WM_NCMOUSEMOVE
+@@ -2803,7 +2767,7 @@ static BOOL check_queue_bits( UINT wake_mask, UINT changed_mask, UINT signal_bit
+         {
+             *wake_bits = queue_shm->wake_bits;
+             *changed_bits = queue_shm->changed_bits;
+-            skip = get_tick_count() - (UINT64)queue_shm->access_time / 10000 < 3000; /* avoid hung queue */
++            skip = TRUE;
+         }
+     }
+ 
+@@ -2858,7 +2822,8 @@ int peek_message( MSG *msg, const struct peek_message_filter *filter )
+         thread_info->client_info.msg_source = prev_source;
+         wake_mask = filter->mask & (QS_SENDMESSAGE | QS_SMRESULT);
+ 
+-        if (check_queue_bits( wake_mask, filter->mask, wake_mask | signal_bits, filter->mask | clear_bits,
++        if (NtGetTickCount() - thread_info->last_getmsg_time < 3000 && /* avoid hung queue */
++            check_queue_bits( wake_mask, filter->mask, wake_mask | signal_bits, filter->mask | clear_bits,
+                               &wake_bits, &changed_bits ))
+             res = STATUS_PENDING;
+         else SERVER_START_REQ( get_message )
+@@ -2872,6 +2837,7 @@ int peek_message( MSG *msg, const struct peek_message_filter *filter )
+             req->wake_mask = wake_mask;
+             req->changed_mask = filter->mask;
+             wine_server_set_reply( req, buffer, buffer_size );
++            thread_info->last_getmsg_time = NtGetTickCount();
+             if (!(res = wine_server_call( req )))
+             {
+                 size = wine_server_reply_size( reply );
+diff --git b/dlls/win32u/ntuser_private.h a/dlls/win32u/ntuser_private.h
+index 2de11465f87..643a01c6fba 100644
+--- b/dlls/win32u/ntuser_private.h
++++ a/dlls/win32u/ntuser_private.h
+@@ -102,6 +102,7 @@ struct user_thread_info
+ {
+     struct ntuser_thread_info     client_info;            /* Data shared with client */
+     HANDLE                        server_queue;           /* Handle to server-side queue */
++    DWORD                         last_getmsg_time;       /* Get/PeekMessage last request time */
+     LONGLONG                      last_driver_time;       /* Get/PeekMessage driver event time */
+     WORD                          hook_call_depth;        /* Number of recursively called hook procs */
+     WORD                          hook_unicode;           /* Is current hook unicode? */
+diff --git b/include/wine/server_protocol.h a/include/wine/server_protocol.h
+index 993a432be66..84e75349b0f 100644
+--- b/include/wine/server_protocol.h
++++ a/include/wine/server_protocol.h
+@@ -962,8 +962,6 @@ struct obj_locator
+ };
+ 
+ #define MAX_ATOM_LEN     255
+-#define WH_WINEVENT      (WH_MAXHOOK + 1)
+-#define NB_HOOKS         (WH_WINEVENT - WH_MINHOOK + 1)
+ 
+ struct shared_cursor
+ {
+@@ -984,12 +982,11 @@ typedef volatile struct
+ 
+ typedef volatile struct
+ {
+-    timeout_t            access_time;
++    int                  hooks_count[WH_MAX - WH_MIN + 2];
+     unsigned int         wake_mask;
+     unsigned int         wake_bits;
+     unsigned int         changed_mask;
+     unsigned int         changed_bits;
+-    int                  hooks_count[NB_HOOKS];
+ } queue_shm_t;
+ 
+ typedef volatile struct
+@@ -6879,6 +6876,6 @@ union generic_reply
+     struct get_inproc_sync_fd_reply get_inproc_sync_fd_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 914
++#define SERVER_PROTOCOL_VERSION 913
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git b/server/hook.c a/server/hook.c
+index fe3c0459651..e53ba4514bf 100644
+--- b/server/hook.c
++++ a/server/hook.c
+@@ -58,6 +58,10 @@ struct hook
+     data_size_t         module_size;
+ };
+ 
++#define WH_WINEVENT (WH_MAXHOOK+1)
++
++#define NB_HOOKS (WH_WINEVENT-WH_MINHOOK+1)
++
+ struct hook_table
+ {
+     struct object obj;              /* object header */
+diff --git b/server/protocol.def a/server/protocol.def
+index 79d507e193b..0c8be12314a 100644
+--- b/server/protocol.def
++++ a/server/protocol.def
+@@ -978,8 +978,6 @@ struct obj_locator
+ };
+ 
+ #define MAX_ATOM_LEN     255
+-#define WH_WINEVENT      (WH_MAXHOOK + 1)
+-#define NB_HOOKS         (WH_WINEVENT - WH_MINHOOK + 1)
+ 
+ struct shared_cursor
+ {
+@@ -1000,12 +998,11 @@ typedef volatile struct
+ 
+ typedef volatile struct
+ {
+-    timeout_t            access_time;      /* last time the queue was accessed */
++    int                  hooks_count[WH_MAX - WH_MIN + 2]; /* active hooks count */
+     unsigned int         wake_mask;        /* wakeup mask */
+     unsigned int         wake_bits;        /* wakeup bits */
+     unsigned int         changed_mask;     /* changed wakeup mask */
+     unsigned int         changed_bits;     /* changed wakeup bits */
+-    int                  hooks_count[NB_HOOKS];  /* active hooks count */
+ } queue_shm_t;
+ 
+ typedef volatile struct
+diff --git b/server/queue.c a/server/queue.c
+index 3f06c15d006..b6cff69f38f 100644
+--- b/server/queue.c
++++ a/server/queue.c
+@@ -133,6 +133,7 @@ struct msg_queue
+     struct timeout_user   *timeout;         /* timeout for next timer to expire */
+     struct thread_input   *input;           /* thread input descriptor */
+     struct hook_table     *hooks;           /* hook table */
++    timeout_t              last_get_msg;    /* time of last get message call */
+     int                    keystate_lock;   /* owns an input keystate lock */
+     int                    waiting;         /* is thread waiting on queue */
+     queue_shm_t           *shared;          /* queue in session shared memory */
+@@ -318,6 +319,7 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+         queue->timeout         = NULL;
+         queue->input           = (struct thread_input *)grab_object( input );
+         queue->hooks           = NULL;
++        queue->last_get_msg    = current_time;
+         queue->keystate_lock   = 0;
+         queue->ignore_post_msg = 0;
+         queue->waiting         = 0;
+@@ -332,7 +334,6 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+         SHARED_WRITE_BEGIN( queue->shared, queue_shm_t )
+         {
+             memset( (void *)shared->hooks_count, 0, sizeof(shared->hooks_count) );
+-            shared->access_time = monotonic_time;
+             shared->wake_mask = 0;
+             shared->wake_bits = 0;
+             shared->changed_mask = 0;
+@@ -1283,7 +1284,7 @@ static void cleanup_results( struct msg_queue *queue )
+ /* check if the thread owning the queue is hung (not checking for messages) */
+ static int is_queue_hung( struct msg_queue *queue )
+ {
+-    if (monotonic_time - queue->shared->access_time <= 5 * TICKS_PER_SEC)
++    if (current_time - queue->last_get_msg <= 5 * TICKS_PER_SEC)
+         return 0;  /* less than 5 seconds since last get message -> not hung */
+     return !queue->waiting;
+ }
+@@ -3154,22 +3155,24 @@ DECL_HANDLER(set_queue_fd)
+ DECL_HANDLER(set_queue_mask)
+ {
+     struct msg_queue *queue = get_current_queue();
+-    queue_shm_t *queue_shm;
+ 
+-    if (!queue) return;
+-    queue_shm = queue->shared;
+-
+-    SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
++    if (queue)
+     {
+-        shared->wake_mask    = req->wake_mask;
+-        shared->changed_mask = req->changed_mask;
+-        reply->wake_bits     = shared->wake_bits;
+-        reply->changed_bits  = shared->changed_bits;
+-    }
+-    SHARED_WRITE_END;
++        queue_shm_t *queue_shm = queue->shared;
+ 
+-    if (!get_queue_status( queue )) reset_queue_sync( queue );
+-    else signal_queue_sync( queue );
++        SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
++        {
++            shared->wake_mask = req->wake_mask;
++            shared->changed_mask = req->changed_mask;
++        }
++        SHARED_WRITE_END;
++
++        reply->wake_bits    = queue_shm->wake_bits;
++        reply->changed_bits = queue_shm->changed_bits;
++
++        if (!get_queue_status( queue )) reset_queue_sync( queue );
++        else signal_queue_sync( queue );
++    }
+ }
+ 
+ 
+@@ -3177,20 +3180,22 @@ DECL_HANDLER(set_queue_mask)
+ DECL_HANDLER(get_queue_status)
+ {
+     struct msg_queue *queue = current->queue;
+-    queue_shm_t *queue_shm;
++    if (queue)
++    {
++        queue_shm_t *queue_shm = queue->shared;
+ 
+-    if (!queue) return;
+-    queue_shm = queue->shared;
++        reply->wake_bits    = queue_shm->wake_bits;
++        reply->changed_bits = queue_shm->changed_bits;
+ 
+-    SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
+-    {
+-        reply->wake_bits      = shared->wake_bits;
+-        reply->changed_bits   = shared->changed_bits;
+-        shared->changed_bits &= ~req->clear_bits;
+-    }
+-    SHARED_WRITE_END;
++        SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
++        {
++            shared->changed_bits &= ~req->clear_bits;
++        }
++        SHARED_WRITE_END;
+ 
+-    if (!get_queue_status( queue )) reset_queue_sync( queue );
++        if (!get_queue_status( queue )) reset_queue_sync( queue );
++    }
++    else reply->wake_bits = reply->changed_bits = 0;
+ }
+ 
+ 
+@@ -3360,11 +3365,7 @@ DECL_HANDLER(get_message)
+         return;
+     }
+ 
+-    SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
+-    {
+-        shared->access_time = monotonic_time;
+-    }
+-    SHARED_WRITE_END;
++    queue->last_get_msg = current_time;
+ 
+     /* first check for sent messages */
+     if ((ptr = list_head( &queue->msg_list[SEND_MESSAGE] )))
+
+diff --git b/dlls/win32u/message.c a/dlls/win32u/message.c
+index 3a3f79a2ee8..035ab6574e4 100644
+--- b/dlls/win32u/message.c
++++ a/dlls/win32u/message.c
+@@ -3219,6 +3219,7 @@ static DWORD wait_objects( DWORD count, const HANDLE *handles, DWORD timeout,
+         {
+             req->wake_mask    = wake_mask;
+             req->changed_mask = changed_mask;
++            req->skip_wait    = 0;
+             wine_server_call( req );
+         }
+         SERVER_END_REQ;
+@@ -3539,6 +3540,7 @@ static void wait_message_reply( UINT flags )
+         {
+             req->wake_mask    = wake_mask;
+             req->changed_mask = wake_mask;
++            req->skip_wait    = 1;
+             wine_server_call( req );
+             wake_bits = reply->wake_bits & wake_mask;
+         }
+diff --git b/include/wine/server_protocol.h a/include/wine/server_protocol.h
+index 84e75349b0f..cce625aacc1 100644
+--- b/include/wine/server_protocol.h
++++ a/include/wine/server_protocol.h
+@@ -2994,7 +2994,7 @@ struct set_queue_mask_request
+     struct request_header __header;
+     unsigned int wake_mask;
+     unsigned int changed_mask;
+-    char __pad_20[4];
++    int          skip_wait;
+ };
+ struct set_queue_mask_reply
+ {
+@@ -6876,6 +6876,6 @@ union generic_reply
+     struct get_inproc_sync_fd_reply get_inproc_sync_fd_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 913
++#define SERVER_PROTOCOL_VERSION 912
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git b/server/protocol.def a/server/protocol.def
+index 0c8be12314a..785f0e26d4e 100644
+--- b/server/protocol.def
++++ a/server/protocol.def
+@@ -2286,6 +2286,7 @@ struct process_info
+ @REQ(set_queue_mask)
+     unsigned int wake_mask;    /* wakeup bits mask */
+     unsigned int changed_mask; /* changed bits mask */
++    int          skip_wait;    /* will we skip waiting if signaled? */
+ @REPLY
+     unsigned int wake_bits;    /* current wake bits */
+     unsigned int changed_bits; /* current changed bits */
+diff --git b/server/queue.c a/server/queue.c
+index b6cff69f38f..0e286063285 100644
+--- b/server/queue.c
++++ a/server/queue.c
+@@ -729,7 +729,7 @@ static void reset_queue_sync( struct msg_queue *queue )
+ }
+ 
+ /* check the queue status */
+-static inline int get_queue_status( struct msg_queue *queue )
++static inline int is_signaled( struct msg_queue *queue )
+ {
+     queue_shm_t *queue_shm = queue->shared;
+     return (queue_shm->wake_bits & queue_shm->wake_mask) ||
+@@ -754,7 +754,7 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
+     }
+     SHARED_WRITE_END;
+ 
+-    if (get_queue_status( queue )) signal_queue_sync( queue );
++    if (is_signaled( queue )) signal_queue_sync( queue );
+ }
+ 
+ /* clear some queue bits */
+@@ -774,7 +774,7 @@ static inline void clear_queue_bits( struct msg_queue *queue, unsigned int bits
+         if (queue->keystate_lock) unlock_input_keystate( queue->input );
+         queue->keystate_lock = 0;
+     }
+-    if (!get_queue_status( queue )) reset_queue_sync( queue );
++    if (!is_signaled( queue )) reset_queue_sync( queue );
+ }
+ 
+ /* check if message is matched by the filter */
+@@ -1348,6 +1348,14 @@ static int msg_queue_signaled( struct object *obj, struct wait_queue_entry *entr
+ static void msg_queue_satisfied( struct object *obj, struct wait_queue_entry *entry )
+ {
+     struct msg_queue *queue = (struct msg_queue *)obj;
++    queue_shm_t *queue_shm = queue->shared;
++
++    SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
++    {
++        shared->wake_mask = 0;
++        shared->changed_mask = 0;
++    }
++    SHARED_WRITE_END;
+     reset_queue_sync( queue );
+ }
+ 
+@@ -3170,8 +3178,9 @@ DECL_HANDLER(set_queue_mask)
+         reply->wake_bits    = queue_shm->wake_bits;
+         reply->changed_bits = queue_shm->changed_bits;
+ 
+-        if (!get_queue_status( queue )) reset_queue_sync( queue );
+-        else signal_queue_sync( queue );
++        if (!is_signaled( queue )) reset_queue_sync( queue );
++        else if (!req->skip_wait) signal_queue_sync( queue );
++        else msg_queue_satisfied( &queue->obj, NULL );
+     }
+ }
+ 
+@@ -3193,7 +3202,7 @@ DECL_HANDLER(get_queue_status)
+         }
+         SHARED_WRITE_END;
+ 
+-        if (!get_queue_status( queue )) reset_queue_sync( queue );
++        if (!is_signaled( queue )) reset_queue_sync( queue );
+     }
+     else reply->wake_bits = reply->changed_bits = 0;
+ }
+@@ -3391,7 +3400,7 @@ DECL_HANDLER(get_message)
+     }
+     SHARED_WRITE_END;
+ 
+-    if (!get_queue_status( queue )) reset_queue_sync( queue );
++    if (!is_signaled( queue )) reset_queue_sync( queue );
+ 
+     /* then check for posted messages */
+     if ((filter & QS_POSTMESSAGE) &&
+diff --git b/server/request_handlers.h a/server/request_handlers.h
+index 89b8af50aec..a0d5799f511 100644
+--- b/server/request_handlers.h
++++ a/server/request_handlers.h
+@@ -1300,6 +1300,7 @@ C_ASSERT( offsetof(struct set_queue_fd_request, handle) == 12 );
+ C_ASSERT( sizeof(struct set_queue_fd_request) == 16 );
+ C_ASSERT( offsetof(struct set_queue_mask_request, wake_mask) == 12 );
+ C_ASSERT( offsetof(struct set_queue_mask_request, changed_mask) == 16 );
++C_ASSERT( offsetof(struct set_queue_mask_request, skip_wait) == 20 );
+ C_ASSERT( sizeof(struct set_queue_mask_request) == 24 );
+ C_ASSERT( offsetof(struct set_queue_mask_reply, wake_bits) == 8 );
+ C_ASSERT( offsetof(struct set_queue_mask_reply, changed_bits) == 12 );
+diff --git b/server/request_trace.h a/server/request_trace.h
+index b9a86a6361b..13c05c754e7 100644
+--- b/server/request_trace.h
++++ a/server/request_trace.h
+@@ -1382,6 +1382,7 @@ static void dump_set_queue_mask_request( const struct set_queue_mask_request *re
+ {
+     fprintf( stderr, " wake_mask=%08x", req->wake_mask );
+     fprintf( stderr, ", changed_mask=%08x", req->changed_mask );
++    fprintf( stderr, ", skip_wait=%d", req->skip_wait );
+ }
+ 
+ static void dump_set_queue_mask_reply( const struct set_queue_mask_reply *req )
+
+diff --git b/dlls/ntdll/unix/sync.c a/dlls/ntdll/unix/sync.c
+index a07ff3ddecf..acdb7b3d9f8 100644
+--- b/dlls/ntdll/unix/sync.c
++++ a/dlls/ntdll/unix/sync.c
+@@ -309,9 +309,9 @@ static unsigned int validate_open_object_attributes( const OBJECT_ATTRIBUTES *at
+ 
+ struct inproc_sync
+ {
+-    int            fd;        /* unix file descriptor */
+-    unsigned int   access;    /* handle access rights */
+-    unsigned int   type;      /* enum inproc_sync_type */
++    int fd;
++    unsigned int access;
++    unsigned int type : 2;
+ };
+ 
+ static void release_inproc_sync( struct inproc_sync *sync )
+@@ -355,18 +355,6 @@ static NTSTATUS get_inproc_sync( HANDLE handle, ACCESS_MASK desired_access, stru
+     return STATUS_SUCCESS;
+ }
+ 
+-extern NTSTATUS check_signal_access( struct inproc_sync *sync )
+-{
+-    switch (sync->type)
+-    {
+-    case INPROC_SYNC_INTERNAL:
+-        return STATUS_OBJECT_TYPE_MISMATCH;
+-    }
+-
+-    assert( 0 );
+-    return STATUS_OBJECT_TYPE_MISMATCH;
+-}
+-
+ static NTSTATUS inproc_release_semaphore( HANDLE handle, ULONG count, ULONG *prev_count )
+ {
+     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+@@ -441,26 +429,7 @@ static NTSTATUS inproc_wait( DWORD count, const HANDLE *handles, BOOLEAN wait_an
+ static NTSTATUS inproc_signal_and_wait( HANDLE signal, HANDLE wait,
+                                         BOOLEAN alertable, const LARGE_INTEGER *timeout )
+ {
+-    struct inproc_sync stack_signal, stack_wait, *signal_sync = &stack_signal, *wait_sync = &stack_wait;
+-    NTSTATUS ret;
+-
+     if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-
+-    if ((ret = get_inproc_sync( signal, 0, signal_sync ))) return ret;
+-    if ((ret = check_signal_access( signal_sync )))
+-    {
+-        release_inproc_sync( signal_sync );
+-        return ret;
+-    }
+-
+-    if ((ret = get_inproc_sync( wait, SYNCHRONIZE, wait_sync )))
+-    {
+-        release_inproc_sync( signal_sync );
+-        return ret;
+-    }
+-
+-    release_inproc_sync( signal_sync );
+-    release_inproc_sync( wait_sync );
+     return STATUS_NOT_IMPLEMENTED;
+ }
+ 
+diff --git b/include/wine/server_protocol.h a/include/wine/server_protocol.h
+index cce625aacc1..ce3bfa7620a 100644
+--- b/include/wine/server_protocol.h
++++ a/include/wine/server_protocol.h
+@@ -5951,8 +5951,8 @@ struct set_keyboard_repeat_reply
+ 
+ enum inproc_sync_type
+ {
+-    INPROC_SYNC_UNKNOWN   = 0,
+-    INPROC_SYNC_INTERNAL  = 1,
++    INPROC_SYNC_UNKNOWN = 0,
++    INPROC_SYNC_EVENT = 1,
+ };
+ 
+ 
+@@ -6876,6 +6876,6 @@ union generic_reply
+     struct get_inproc_sync_fd_reply get_inproc_sync_fd_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 912
++#define SERVER_PROTOCOL_VERSION 911
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git b/server/inproc_sync.c a/server/inproc_sync.c
+index 41a9c2770a7..f20410c85ed 100644
+--- b/server/inproc_sync.c
++++ a/server/inproc_sync.c
+@@ -87,21 +87,15 @@ static const struct object_ops inproc_sync_ops =
+     inproc_sync_destroy,        /* destroy */
+ };
+ 
+-struct inproc_sync *create_inproc_internal_sync( int manual, int signaled )
++struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
+ {
+     struct ntsync_event_args args = {.signaled = signaled, .manual = manual};
+     struct inproc_sync *event;
+ 
+     if (!(event = alloc_object( &inproc_sync_ops ))) return NULL;
+-    event->type = INPROC_SYNC_INTERNAL;
+-    event->fd   = ioctl( get_inproc_device_fd(), NTSYNC_IOC_CREATE_EVENT, &args );
++    event->type = INPROC_SYNC_EVENT;
++    event->fd = ioctl( get_inproc_device_fd(), NTSYNC_IOC_CREATE_EVENT, &args );
+ 
+-    if (event->fd == -1)
+-    {
+-        set_error( STATUS_TOO_MANY_OPENED_FILES );
+-        release_object( event );
+-        return NULL;
+-    }
+     return event;
+ }
+ 
+@@ -160,7 +154,7 @@ int get_inproc_device_fd(void)
+     return -1;
+ }
+ 
+-struct inproc_sync *create_inproc_internal_sync( int manual, int signaled )
++struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
+ {
+     return NULL;
+ }
+diff --git b/server/object.h a/server/object.h
+index 203734a565f..51b74429e73 100644
+--- b/server/object.h
++++ a/server/object.h
+@@ -244,7 +244,7 @@ extern void abandon_mutexes( struct thread *thread );
+ 
+ struct inproc_sync;
+ extern int get_inproc_device_fd(void);
+-extern struct inproc_sync *create_inproc_internal_sync( int manual, int signaled );
++extern struct inproc_sync *create_inproc_event_sync( int manual, int signaled );
+ extern void signal_inproc_sync( struct inproc_sync *sync );
+ extern void reset_inproc_sync( struct inproc_sync *sync );
+ 
+diff --git b/server/protocol.def a/server/protocol.def
+index 785f0e26d4e..6bb7ae155c6 100644
+--- b/server/protocol.def
++++ a/server/protocol.def
+@@ -4126,8 +4126,8 @@ struct handle_info
+ 
+ enum inproc_sync_type
+ {
+-    INPROC_SYNC_UNKNOWN   = 0,
+-    INPROC_SYNC_INTERNAL  = 1,
++    INPROC_SYNC_UNKNOWN = 0,
++    INPROC_SYNC_EVENT = 1,
+ };
+ 
+ /* Get the in-process synchronization fd associated with the waitable handle */
+diff --git b/server/queue.c a/server/queue.c
+index 0e286063285..596742bc64c 100644
+--- b/server/queue.c
++++ a/server/queue.c
+@@ -328,7 +328,7 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+         list_init( &queue->expired_timers );
+         for (i = 0; i < NB_MSG_KINDS; i++) list_init( &queue->msg_list[i] );
+ 
+-        if (get_inproc_device_fd() >= 0 && !(queue->inproc_sync = create_inproc_internal_sync( 1, 0 ))) goto error;
++        if (get_inproc_device_fd() >= 0 && !(queue->inproc_sync = create_inproc_event_sync( 1, 0 ))) goto error;
+         if (!(queue->shared = alloc_shared_object())) goto error;
+ 
+         SHARED_WRITE_BEGIN( queue->shared, queue_shm_t )
+
+diff --git b/configure a/configure
+index 3a21302782d..f2f8ab95d3d 100755
+--- b/configure
++++ a/configure
+@@ -9998,12 +9998,6 @@ if test "x$ac_cv_header_linux_major_h" = xyes
+ then :
+   printf "%s\n" "#define HAVE_LINUX_MAJOR_H 1" >>confdefs.h
+ 
+-fi
+-ac_fn_c_check_header_compile "$LINENO" "linux/ntsync.h" "ac_cv_header_linux_ntsync_h" "$ac_includes_default"
+-if test "x$ac_cv_header_linux_ntsync_h" = xyes
+-then :
+-  printf "%s\n" "#define HAVE_LINUX_NTSYNC_H 1" >>confdefs.h
+-
+ fi
+ ac_fn_c_check_header_compile "$LINENO" "linux/param.h" "ac_cv_header_linux_param_h" "$ac_includes_default"
+ if test "x$ac_cv_header_linux_param_h" = xyes
+diff --git b/configure.ac a/configure.ac
+index e792e45d6d4..2cc5398d178 100644
+--- b/configure.ac
++++ a/configure.ac
+@@ -682,7 +682,6 @@ AC_CHECK_HEADERS(\
+ 	linux/input.h \
+ 	linux/ioctl.h \
+ 	linux/major.h \
+-	linux/ntsync.h \
+ 	linux/param.h \
+ 	linux/serial.h \
+ 	linux/types.h \
+diff --git b/dlls/ntdll/unix/server.c a/dlls/ntdll/unix/server.c
+index e8da94ebc64..0c99e9c2e66 100644
+--- b/dlls/ntdll/unix/server.c
++++ a/dlls/ntdll/unix/server.c
+@@ -104,7 +104,7 @@ sigset_t server_block_set;  /* signals to block during server calls */
+ static int fd_socket = -1;  /* socket to exchange file descriptors with the server */
+ static int initial_cwd = -1;
+ static pid_t server_pid;
+-pthread_mutex_t fd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pthread_mutex_t fd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+ 
+ /* atomically exchange a 64-bit value */
+ static inline LONG64 interlocked_xchg64( LONG64 *dest, LONG64 val )
+@@ -961,7 +961,7 @@ void wine_server_send_fd( int fd )
+  *
+  * Receive a file descriptor passed from the server.
+  */
+-int wine_server_receive_fd( obj_handle_t *handle )
++static int receive_fd( obj_handle_t *handle )
+ {
+     struct iovec vec;
+     struct msghdr msghdr;
+@@ -1156,7 +1156,7 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+                 if (type) *type = reply->type;
+                 if (options) *options = reply->options;
+                 access = reply->access;
+-                if ((fd = wine_server_receive_fd( &fd_handle )) != -1)
++                if ((fd = receive_fd( &fd_handle )) != -1)
+                 {
+                     assert( wine_server_ptr_handle(fd_handle) == handle );
+                     *needs_close = (!reply->cacheable ||
+@@ -1570,7 +1570,6 @@ size_t server_init_process(void)
+ {
+     const char *arch = getenv( "WINEARCH" );
+     const char *env_socket = getenv( "WINESERVERSOCKET" );
+-    struct ntdll_thread_data *data = ntdll_get_thread_data();
+     obj_handle_t version;
+     unsigned int i;
+     int ret, reply_pipe;
+@@ -1610,7 +1609,7 @@ size_t server_init_process(void)
+     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
+ 
+     /* receive the first thread request fd on the main socket */
+-    data->request_fd = wine_server_receive_fd( &version );
++    ntdll_get_thread_data()->request_fd = receive_fd( &version );
+ 
+ #ifdef SO_PASSCRED
+     /* now that we hopefully received the server_pid, disable SO_PASSCRED */
+@@ -1645,24 +1644,16 @@ size_t server_init_process(void)
+         req->unix_pid    = getpid();
+         req->unix_tid    = get_unix_tid();
+         req->reply_fd    = reply_pipe;
+-        req->wait_fd     = data->wait_fd[1];
++        req->wait_fd     = ntdll_get_thread_data()->wait_fd[1];
+         req->debug_level = (TRACE_ON(server) != 0);
+         wine_server_set_reply( req, supported_machines, sizeof(supported_machines) );
+-        if (!(ret = wine_server_call( req )))
+-        {
+-            obj_handle_t handle;
+-            pid               = reply->pid;
+-            tid               = reply->tid;
+-            peb->SessionId    = reply->session_id;
+-            info_size         = reply->info_size;
+-            server_start_time = reply->server_start;
+-            supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
+-            if (reply->inproc_device)
+-            {
+-                inproc_device_fd = wine_server_receive_fd( &handle );
+-                assert( handle == reply->inproc_device );
+-            }
+-        }
++        ret = wine_server_call( req );
++        pid               = reply->pid;
++        tid               = reply->tid;
++        peb->SessionId    = reply->session_id;
++        info_size         = reply->info_size;
++        server_start_time = reply->server_start;
++        supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
+     }
+     SERVER_END_REQ;
+     close( reply_pipe );
+diff --git b/dlls/ntdll/unix/sync.c a/dlls/ntdll/unix/sync.c
+index acdb7b3d9f8..117915beb19 100644
+--- b/dlls/ntdll/unix/sync.c
++++ a/dlls/ntdll/unix/sync.c
+@@ -57,9 +57,6 @@
+ #ifdef HAVE_KQUEUE
+ # include <sys/event.h>
+ #endif
+-#ifdef HAVE_LINUX_NTSYNC_H
+-# include <linux/ntsync.h>
+-#endif
+ 
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+@@ -73,16 +70,13 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
+ HANDLE keyed_event = 0;
+-int inproc_device_fd = -1;
+ 
+ static const char *debugstr_timeout( const LARGE_INTEGER *timeout )
+ {
+     if (!timeout) return "(infinite)";
+-    return wine_dbg_sprintf( "%lld.%07ld", (long long)(timeout->QuadPart / TICKSPERSEC),
+-                             (long)(timeout->QuadPart % TICKSPERSEC) );
++    return wine_dbgstr_longlong( timeout->QuadPart );
+ }
+ 
+-
+ /* return a monotonic time counter, in Win32 ticks */
+ static inline ULONGLONG monotonic_counter(void)
+ {
+@@ -307,133 +301,6 @@ static unsigned int validate_open_object_attributes( const OBJECT_ATTRIBUTES *at
+ }
+ 
+ 
+-struct inproc_sync
+-{
+-    int fd;
+-    unsigned int access;
+-    unsigned int type : 2;
+-};
+-
+-static void release_inproc_sync( struct inproc_sync *sync )
+-{
+-    close( sync->fd );
+-}
+-
+-static NTSTATUS get_inproc_sync( HANDLE handle, ACCESS_MASK desired_access, struct inproc_sync *sync )
+-{
+-    sigset_t sigset;
+-    NTSTATUS ret;
+-
+-    /* We need to use fd_cache_mutex here to protect against races with
+-     * other threads trying to receive fds for the fd cache,
+-     * and we need to use an uninterrupted section to prevent reentrancy. */
+-    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+-
+-    SERVER_START_REQ( get_inproc_sync_fd )
+-    {
+-        req->handle = wine_server_obj_handle( handle );
+-        if (!(ret = wine_server_call( req )))
+-        {
+-            obj_handle_t fd_handle;
+-            sync->fd = wine_server_receive_fd( &fd_handle );
+-            assert( wine_server_ptr_handle(fd_handle) == handle );
+-            sync->access = reply->access;
+-            sync->type = reply->type;
+-        }
+-    }
+-    SERVER_END_REQ;
+-
+-    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+-
+-    if (ret) return ret;
+-    if ((sync->access & desired_access) != desired_access)
+-    {
+-        release_inproc_sync( sync );
+-        return STATUS_ACCESS_DENIED;
+-    }
+-
+-    return STATUS_SUCCESS;
+-}
+-
+-static NTSTATUS inproc_release_semaphore( HANDLE handle, ULONG count, ULONG *prev_count )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_query_semaphore( HANDLE handle, SEMAPHORE_BASIC_INFORMATION *info )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_set_event( HANDLE handle, LONG *prev_state )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_reset_event( HANDLE handle, LONG *prev_state )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_pulse_event( HANDLE handle, LONG *prev_state )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_query_event( HANDLE handle, EVENT_BASIC_INFORMATION *info )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_release_mutex( HANDLE handle, LONG *prev_count )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_query_mutex( HANDLE handle, MUTANT_BASIC_INFORMATION *info )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_wait( DWORD count, const HANDLE *handles, BOOLEAN wait_any,
+-                             BOOLEAN alertable, const LARGE_INTEGER *timeout )
+-{
+-    struct inproc_sync *syncs[64], stack[ARRAY_SIZE(syncs)];
+-    NTSTATUS ret;
+-
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-
+-    assert( count <= ARRAY_SIZE(syncs) );
+-    for (int i = 0; i < count; ++i)
+-    {
+-        if ((ret = get_inproc_sync( handles[i], SYNCHRONIZE, stack + i )))
+-        {
+-            while (i--) release_inproc_sync( syncs[i] );
+-            return ret;
+-        }
+-        syncs[i] = stack + i;
+-    }
+-
+-    while (count--) release_inproc_sync( syncs[count] );
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-static NTSTATUS inproc_signal_and_wait( HANDLE signal, HANDLE wait,
+-                                        BOOLEAN alertable, const LARGE_INTEGER *timeout )
+-{
+-    if (inproc_device_fd < 0) return STATUS_NOT_IMPLEMENTED;
+-    return STATUS_NOT_IMPLEMENTED;
+-}
+-
+-
+ /******************************************************************************
+  *              NtCreateSemaphore (NTDLL.@)
+  */
+@@ -444,9 +311,6 @@ NTSTATUS WINAPI NtCreateSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJ
+     data_size_t len;
+     struct object_attributes *objattr;
+ 
+-    TRACE( "access %#x, name %s, initial %d, max %d\n", access,
+-           attr ? debugstr_us(attr->ObjectName) : "(null)", initial, max );
+-
+     *handle = 0;
+     if (max <= 0 || initial < 0 || initial > max) return STATUS_INVALID_PARAMETER;
+     if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+@@ -474,8 +338,6 @@ NTSTATUS WINAPI NtOpenSemaphore( HANDLE *handle, ACCESS_MASK access, const OBJEC
+ {
+     unsigned int ret;
+ 
+-    TRACE( "access %#x, name %s\n", access, attr ? debugstr_us(attr->ObjectName) : "(null)" );
+-
+     *handle = 0;
+     if ((ret = validate_open_object_attributes( attr ))) return ret;
+ 
+@@ -513,12 +375,6 @@ NTSTATUS WINAPI NtQuerySemaphore( HANDLE handle, SEMAPHORE_INFORMATION_CLASS cla
+ 
+     if (len != sizeof(SEMAPHORE_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
+ 
+-    if ((ret = inproc_query_semaphore( handle, out )) != STATUS_NOT_IMPLEMENTED)
+-    {
+-        if (!ret && ret_len) *ret_len = sizeof(SEMAPHORE_BASIC_INFORMATION);
+-        return ret;
+-    }
+-
+     SERVER_START_REQ( query_semaphore )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -541,11 +397,6 @@ NTSTATUS WINAPI NtReleaseSemaphore( HANDLE handle, ULONG count, ULONG *previous
+ {
+     unsigned int ret;
+ 
+-    TRACE( "handle %p, count %u, prev_count %p\n", handle, count, previous );
+-
+-    if ((ret = inproc_release_semaphore( handle, count, previous )) != STATUS_NOT_IMPLEMENTED)
+-        return ret;
+-
+     SERVER_START_REQ( release_semaphore )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -570,9 +421,6 @@ NTSTATUS WINAPI NtCreateEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_
+     data_size_t len;
+     struct object_attributes *objattr;
+ 
+-    TRACE( "access %#x, name %s, type %u, state %u\n", access,
+-           attr ? debugstr_us(attr->ObjectName) : "(null)", type, state );
+-
+     *handle = 0;
+     if (type != NotificationEvent && type != SynchronizationEvent) return STATUS_INVALID_PARAMETER;
+     if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+@@ -600,8 +448,6 @@ NTSTATUS WINAPI NtOpenEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
+ {
+     unsigned int ret;
+ 
+-    TRACE( "access %#x, name %s\n", access, attr ? debugstr_us(attr->ObjectName) : "(null)" );
+-
+     *handle = 0;
+     if ((ret = validate_open_object_attributes( attr ))) return ret;
+ 
+@@ -627,11 +473,6 @@ NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
+ {
+     unsigned int ret;
+ 
+-    TRACE( "handle %p, prev_state %p\n", handle, prev_state );
+-
+-    if ((ret = inproc_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+-        return ret;
+-
+     SERVER_START_REQ( event_op )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -651,11 +492,6 @@ NTSTATUS WINAPI NtResetEvent( HANDLE handle, LONG *prev_state )
+ {
+     unsigned int ret;
+ 
+-    TRACE( "handle %p, prev_state %p\n", handle, prev_state );
+-
+-    if ((ret = inproc_reset_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+-        return ret;
+-
+     SERVER_START_REQ( event_op )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -685,11 +521,6 @@ NTSTATUS WINAPI NtPulseEvent( HANDLE handle, LONG *prev_state )
+ {
+     unsigned int ret;
+ 
+-    TRACE( "handle %p, prev_state %p\n", handle, prev_state );
+-
+-    if ((ret = inproc_pulse_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
+-        return ret;
+-
+     SERVER_START_REQ( event_op )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -721,12 +552,6 @@ NTSTATUS WINAPI NtQueryEvent( HANDLE handle, EVENT_INFORMATION_CLASS class,
+ 
+     if (len != sizeof(EVENT_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
+ 
+-    if ((ret = inproc_query_event( handle, out )) != STATUS_NOT_IMPLEMENTED)
+-    {
+-        if (!ret && ret_len) *ret_len = sizeof(EVENT_BASIC_INFORMATION);
+-        return ret;
+-    }
+-
+     SERVER_START_REQ( query_event )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -752,9 +577,6 @@ NTSTATUS WINAPI NtCreateMutant( HANDLE *handle, ACCESS_MASK access, const OBJECT
+     data_size_t len;
+     struct object_attributes *objattr;
+ 
+-    TRACE( "access %#x, name %s, owned %u\n", access,
+-           attr ? debugstr_us(attr->ObjectName) : "(null)", owned );
+-
+     *handle = 0;
+     if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+ 
+@@ -780,8 +602,6 @@ NTSTATUS WINAPI NtOpenMutant( HANDLE *handle, ACCESS_MASK access, const OBJECT_A
+ {
+     unsigned int ret;
+ 
+-    TRACE( "access %#x, name %s\n", access, attr ? debugstr_us(attr->ObjectName) : "(null)" );
+-
+     *handle = 0;
+     if ((ret = validate_open_object_attributes( attr ))) return ret;
+ 
+@@ -807,11 +627,6 @@ NTSTATUS WINAPI NtReleaseMutant( HANDLE handle, LONG *prev_count )
+ {
+     unsigned int ret;
+ 
+-    TRACE( "handle %p, prev_count %p\n", handle, prev_count );
+-
+-    if ((ret = inproc_release_mutex( handle, prev_count )) != STATUS_NOT_IMPLEMENTED)
+-        return ret;
+-
+     SERVER_START_REQ( release_mutex )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -842,12 +657,6 @@ NTSTATUS WINAPI NtQueryMutant( HANDLE handle, MUTANT_INFORMATION_CLASS class,
+ 
+     if (len != sizeof(MUTANT_BASIC_INFORMATION)) return STATUS_INFO_LENGTH_MISMATCH;
+ 
+-    if ((ret = inproc_query_mutex( handle, out )) != STATUS_NOT_IMPLEMENTED)
+-    {
+-        if (!ret && ret_len) *ret_len = sizeof(MUTANT_BASIC_INFORMATION);
+-        return ret;
+-    }
+-
+     SERVER_START_REQ( query_mutex )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -1617,9 +1426,6 @@ NTSTATUS WINAPI NtCreateTimer( HANDLE *handle, ACCESS_MASK access, const OBJECT_
+     data_size_t len;
+     struct object_attributes *objattr;
+ 
+-    TRACE( "access %#x, name %s, type %u\n", access,
+-           attr ? debugstr_us(attr->ObjectName) : "(null)", type );
+-
+     *handle = 0;
+     if (type != NotificationTimer && type != SynchronizationTimer) return STATUS_INVALID_PARAMETER;
+     if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+@@ -1647,8 +1453,6 @@ NTSTATUS WINAPI NtOpenTimer( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
+ {
+     unsigned int ret;
+ 
+-    TRACE( "access %#x, name %s\n", access, attr ? debugstr_us(attr->ObjectName) : "(null)" );
+-
+     *handle = 0;
+     if ((ret = validate_open_object_attributes( attr ))) return ret;
+ 
+@@ -1702,8 +1506,6 @@ NTSTATUS WINAPI NtCancelTimer( HANDLE handle, BOOLEAN *state )
+ {
+     unsigned int ret;
+ 
+-    TRACE( "handle %p, state %p\n", handle, state );
+-
+     SERVER_START_REQ( cancel_timer )
+     {
+         req->handle = wine_server_obj_handle( handle );
+@@ -1772,29 +1574,13 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, BO
+ {
+     union select_op select_op;
+     UINT i, flags = SELECT_INTERRUPTIBLE;
+-    unsigned int ret;
+ 
+     if (!count || count > MAXIMUM_WAIT_OBJECTS) return STATUS_INVALID_PARAMETER_1;
+ 
+-    if (TRACE_ON(sync))
+-    {
+-        TRACE( "wait_any %u, alertable %u, handles {%p", wait_any, alertable, handles[0] );
+-        for (i = 1; i < count; i++) TRACE( ", %p", handles[i] );
+-        TRACE( "}, timeout %s\n", debugstr_timeout(timeout) );
+-    }
+-
+-    if ((ret = inproc_wait( count, handles, wait_any, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+-    {
+-        TRACE( "-> %#x\n", ret );
+-        return ret;
+-    }
+-
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.wait.op = wait_any ? SELECT_WAIT : SELECT_WAIT_ALL;
+     for (i = 0; i < count; i++) select_op.wait.handles[i] = wine_server_obj_handle( handles[i] );
+-    ret = server_wait( &select_op, offsetof( union select_op, wait.handles[count] ), flags, timeout );
+-    TRACE( "-> %#x\n", ret );
+-    return ret;
++    return server_wait( &select_op, offsetof( union select_op, wait.handles[count] ), flags, timeout );
+ }
+ 
+ 
+@@ -1815,15 +1601,9 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
+ {
+     union select_op select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
+-    NTSTATUS ret;
+-
+-    TRACE( "signal %p, wait %p, alertable %u, timeout %s\n", signal, wait, alertable, debugstr_timeout(timeout) );
+ 
+     if (!signal) return STATUS_INVALID_HANDLE;
+ 
+-    if ((ret = inproc_signal_and_wait( signal, wait, alertable, timeout )) != STATUS_NOT_IMPLEMENTED)
+-        return ret;
+-
+     if (alertable) flags |= SELECT_ALERTABLE;
+     select_op.signal_and_wait.op = SELECT_SIGNAL_AND_WAIT;
+     select_op.signal_and_wait.wait = wine_server_obj_handle( wait );
+@@ -2066,9 +1846,6 @@ NTSTATUS WINAPI NtCreateKeyedEvent( HANDLE *handle, ACCESS_MASK access,
+     data_size_t len;
+     struct object_attributes *objattr;
+ 
+-    TRACE( "access %#x, name %s, flags %#x\n", access,
+-           attr ? debugstr_us(attr->ObjectName) : "(null)", flags );
+-
+     *handle = 0;
+     if ((ret = alloc_object_attributes( attr, &objattr, &len ))) return ret;
+ 
+@@ -2093,8 +1870,6 @@ NTSTATUS WINAPI NtOpenKeyedEvent( HANDLE *handle, ACCESS_MASK access, const OBJE
+ {
+     unsigned int ret;
+ 
+-    TRACE( "access %#x, name %s\n", access, attr ? debugstr_us(attr->ObjectName) : "(null)" );
+-
+     *handle = 0;
+     if ((ret = validate_open_object_attributes( attr ))) return ret;
+ 
+@@ -2121,8 +1896,6 @@ NTSTATUS WINAPI NtWaitForKeyedEvent( HANDLE handle, const void *key,
+     union select_op select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
+ 
+-    TRACE( "handle %p, key %p, alertable %u, timeout %s\n", handle, key, alertable, debugstr_timeout(timeout) );
+-
+     if (!handle) handle = keyed_event;
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
+     if (alertable) flags |= SELECT_ALERTABLE;
+@@ -2142,8 +1915,6 @@ NTSTATUS WINAPI NtReleaseKeyedEvent( HANDLE handle, const void *key,
+     union select_op select_op;
+     UINT flags = SELECT_INTERRUPTIBLE;
+ 
+-    TRACE( "handle %p, key %p, alertable %u, timeout %s\n", handle, key, alertable, debugstr_timeout(timeout) );
+-
+     if (!handle) handle = keyed_event;
+     if ((ULONG_PTR)key & 1) return STATUS_INVALID_PARAMETER_1;
+     if (alertable) flags |= SELECT_ALERTABLE;
+diff --git b/dlls/ntdll/unix/unix_private.h a/dlls/ntdll/unix/unix_private.h
+index 974766b97a7..1f6396bee0c 100644
+--- b/dlls/ntdll/unix/unix_private.h
++++ a/dlls/ntdll/unix/unix_private.h
+@@ -197,10 +197,8 @@ extern unsigned int supported_machines_count;
+ extern USHORT supported_machines[8];
+ extern BOOL process_exiting;
+ extern HANDLE keyed_event;
+-extern int inproc_device_fd;
+ extern timeout_t server_start_time;
+ extern sigset_t server_block_set;
+-extern pthread_mutex_t fd_cache_mutex;
+ extern struct _KUSER_SHARED_DATA *user_shared_data;
+ #ifdef __i386__
+ extern struct ldt_copy __wine_ldt_copy;
+@@ -235,7 +233,6 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
+ extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+                                int *needs_close, enum server_fd_type *type, unsigned int *options );
+ extern void wine_server_send_fd( int fd );
+-extern int wine_server_receive_fd( obj_handle_t *handle );
+ extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
+ extern size_t server_init_process(void);
+ extern void server_init_process_done(void);
+diff --git b/include/config.h.in a/include/config.h.in
+index b5b57d8fd7b..da596d65bb2 100644
+--- b/include/config.h.in
++++ a/include/config.h.in
+@@ -198,9 +198,6 @@
+ /* Define to 1 if you have the <linux/major.h> header file. */
+ #undef HAVE_LINUX_MAJOR_H
+ 
+-/* Define to 1 if you have the <linux/ntsync.h> header file. */
+-#undef HAVE_LINUX_NTSYNC_H
+-
+ /* Define to 1 if you have the <linux/param.h> header file. */
+ #undef HAVE_LINUX_PARAM_H
+ 
+diff --git b/include/wine/server_protocol.h a/include/wine/server_protocol.h
+index 781b4a4e59f..62145442ffc 100644
+--- b/include/wine/server_protocol.h
++++ a/include/wine/server_protocol.h
+@@ -1148,10 +1148,8 @@ struct init_first_thread_reply
+     thread_id_t  tid;
+     timeout_t    server_start;
+     unsigned int session_id;
+-    obj_handle_t inproc_device;
+     data_size_t  info_size;
+     /* VARARG(machines,ushorts); */
+-    char __pad_36[4];
+ };
+ 
+ 
+@@ -5956,26 +5954,6 @@ struct set_keyboard_repeat_reply
+ };
+ 
+ 
+-enum inproc_sync_type
+-{
+-    INPROC_SYNC_UNKNOWN = 0,
+-    INPROC_SYNC_EVENT = 1,
+-};
+-
+-
+-struct get_inproc_sync_fd_request
+-{
+-    struct request_header __header;
+-    obj_handle_t handle;
+-};
+-struct get_inproc_sync_fd_reply
+-{
+-    struct reply_header __header;
+-    int           type;
+-    unsigned int access;
+-};
+-
+-
+ 
+ struct d3dkmt_object_create_request
+ {
+@@ -6275,7 +6253,6 @@ enum request
+     REQ_get_next_process,
+     REQ_get_next_thread,
+     REQ_set_keyboard_repeat,
+-    REQ_get_inproc_sync_fd,
+     REQ_d3dkmt_object_create,
+     REQ_d3dkmt_object_query,
+     REQ_NB_REQUESTS
+@@ -6580,7 +6557,6 @@ union generic_request
+     struct get_next_process_request get_next_process_request;
+     struct get_next_thread_request get_next_thread_request;
+     struct set_keyboard_repeat_request set_keyboard_repeat_request;
+-    struct get_inproc_sync_fd_request get_inproc_sync_fd_request;
+     struct d3dkmt_object_create_request d3dkmt_object_create_request;
+     struct d3dkmt_object_query_request d3dkmt_object_query_request;
+ };
+@@ -6883,14 +6859,13 @@ union generic_reply
+     struct get_next_process_reply get_next_process_reply;
+     struct get_next_thread_reply get_next_thread_reply;
+     struct set_keyboard_repeat_reply set_keyboard_repeat_reply;
+-    struct get_inproc_sync_fd_reply get_inproc_sync_fd_reply;
+     struct d3dkmt_object_create_reply d3dkmt_object_create_reply;
+     struct d3dkmt_object_query_reply d3dkmt_object_query_reply;
+     struct d3dkmt_object_open_reply d3dkmt_object_open_reply;
+     struct d3dkmt_share_objects_reply d3dkmt_share_objects_reply;
+     struct d3dkmt_object_open_name_reply d3dkmt_object_open_name_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 911
++#define SERVER_PROTOCOL_VERSION 908
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git b/server/Makefile.in a/server/Makefile.in
+index 57250fd0332..6e4e68d6ebf 100644
+--- b/server/Makefile.in
++++ a/server/Makefile.in
+@@ -16,7 +16,6 @@ SOURCES = \
+ 	file.c \
+ 	handle.c \
+ 	hook.c \
+-	inproc_sync.c \
+ 	mach.c \
+ 	mailslot.c \
+ 	main.c \
+diff --git b/server/inproc_sync.c a/server/inproc_sync.c
+deleted file mode 100644
+index f20410c85ed..00000000000
+--- b/server/inproc_sync.c
++++ /dev/null
+@@ -1,190 +0,0 @@
+-/*
+- * In-process synchronization primitives
+- *
+- * Copyright (C) 2021-2022 Elizabeth Figura for CodeWeavers
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public
+- * License as published by the Free Software Foundation; either
+- * version 2.1 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+- */
+-
+-#include "config.h"
+-
+-#include <assert.h>
+-#include <stdint.h>
+-#include <stdio.h>
+-
+-#include "ntstatus.h"
+-#define WIN32_NO_STATUS
+-#include "winternl.h"
+-
+-#include "file.h"
+-#include "handle.h"
+-#include "request.h"
+-#include "thread.h"
+-#include "user.h"
+-
+-#ifdef HAVE_LINUX_NTSYNC_H
+-# include <linux/ntsync.h>
+-#endif
+-
+-#ifdef NTSYNC_IOC_EVENT_READ
+-
+-#include <fcntl.h>
+-#include <sys/ioctl.h>
+-#include <sys/stat.h>
+-#include <unistd.h>
+-
+-int get_inproc_device_fd(void)
+-{
+-    static int fd = -2;
+-    if (fd == -2) fd = open( "/dev/ntsync", O_CLOEXEC | O_RDONLY );
+-    return fd;
+-}
+-
+-struct inproc_sync
+-{
+-    struct object          obj;  /* object header */
+-    enum inproc_sync_type  type;
+-    int                    fd;
+-};
+-
+-static void inproc_sync_dump( struct object *obj, int verbose );
+-static void inproc_sync_destroy( struct object *obj );
+-
+-static const struct object_ops inproc_sync_ops =
+-{
+-    sizeof(struct inproc_sync), /* size */
+-    &no_type,                   /* type */
+-    inproc_sync_dump,           /* dump */
+-    no_add_queue,               /* add_queue */
+-    NULL,                       /* remove_queue */
+-    NULL,                       /* signaled */
+-    NULL,                       /* satisfied */
+-    no_signal,                  /* signal */
+-    no_get_fd,                  /* get_fd */
+-    default_get_sync,           /* get_sync */
+-    default_map_access,         /* map_access */
+-    default_get_sd,             /* get_sd */
+-    default_set_sd,             /* set_sd */
+-    default_get_full_name,      /* get_full_name */
+-    no_lookup_name,             /* lookup_name */
+-    directory_link_name,        /* link_name */
+-    default_unlink_name,        /* unlink_name */
+-    no_open_file,               /* open_file */
+-    no_kernel_obj_list,         /* get_kernel_obj_list */
+-    no_close_handle,            /* close_handle */
+-    inproc_sync_destroy,        /* destroy */
+-};
+-
+-struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
+-{
+-    struct ntsync_event_args args = {.signaled = signaled, .manual = manual};
+-    struct inproc_sync *event;
+-
+-    if (!(event = alloc_object( &inproc_sync_ops ))) return NULL;
+-    event->type = INPROC_SYNC_EVENT;
+-    event->fd = ioctl( get_inproc_device_fd(), NTSYNC_IOC_CREATE_EVENT, &args );
+-
+-    return event;
+-}
+-
+-static void inproc_sync_dump( struct object *obj, int verbose )
+-{
+-    struct inproc_sync *sync = (struct inproc_sync *)obj;
+-    assert( obj->ops == &inproc_sync_ops );
+-    fprintf( stderr, "Inproc sync type=%d, fd=%d\n", sync->type, sync->fd );
+-}
+-
+-void signal_inproc_sync( struct inproc_sync *sync )
+-{
+-    __u32 count;
+-    if (debug_level) fprintf( stderr, "set_inproc_event %d\n", sync->fd );
+-    ioctl( sync->fd, NTSYNC_IOC_EVENT_SET, &count );
+-}
+-
+-void reset_inproc_sync( struct inproc_sync *sync )
+-{
+-    __u32 count;
+-    if (debug_level) fprintf( stderr, "reset_inproc_event %d\n", sync->fd );
+-    ioctl( sync->fd, NTSYNC_IOC_EVENT_RESET, &count );
+-}
+-
+-static void inproc_sync_destroy( struct object *obj )
+-{
+-    struct inproc_sync *sync = (struct inproc_sync *)obj;
+-    assert( obj->ops == &inproc_sync_ops );
+-    close( sync->fd );
+-}
+-
+-static int get_inproc_sync_fd( struct object *obj, int *type )
+-{
+-    struct object *sync;
+-    int fd = -1;
+-
+-    if (obj != (struct object *)current->queue) sync = get_obj_sync( obj );
+-    else sync = thread_queue_inproc_sync( current );
+-    if (!sync) return -1;
+-
+-    if (sync->ops == &inproc_sync_ops)
+-    {
+-        struct inproc_sync *inproc = (struct inproc_sync *)sync;
+-        *type = inproc->type;
+-        fd = inproc->fd;
+-    }
+-
+-    release_object( sync );
+-    return fd;
+-}
+-
+-#else /* NTSYNC_IOC_EVENT_READ */
+-
+-int get_inproc_device_fd(void)
+-{
+-    return -1;
+-}
+-
+-struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
+-{
+-    return NULL;
+-}
+-
+-void signal_inproc_sync( struct inproc_sync *sync )
+-{
+-}
+-
+-void reset_inproc_sync( struct inproc_sync *sync )
+-{
+-}
+-
+-static int get_inproc_sync_fd( struct object *obj, int *type )
+-{
+-    return -1;
+-}
+-
+-#endif /* NTSYNC_IOC_EVENT_READ */
+-
+-DECL_HANDLER(get_inproc_sync_fd)
+-{
+-    struct object *obj;
+-    int fd;
+-
+-    if (!(obj = get_handle_obj( current->process, req->handle, 0, NULL ))) return;
+-
+-    reply->access = get_handle_access( current->process, req->handle );
+-
+-    if ((fd = get_inproc_sync_fd( obj, &reply->type )) < 0) set_error( STATUS_NOT_IMPLEMENTED );
+-    else send_client_fd( current->process, fd, req->handle );
+-
+-    release_object( obj );
+-}
+diff --git b/server/object.h a/server/object.h
+index 51b74429e73..0e74b9ba9d7 100644
+--- b/server/object.h
++++ a/server/object.h
+@@ -240,14 +240,6 @@ extern void reset_event( struct event *event );
+ 
+ extern void abandon_mutexes( struct thread *thread );
+ 
+-/* in-process synchronization functions */
+-
+-struct inproc_sync;
+-extern int get_inproc_device_fd(void);
+-extern struct inproc_sync *create_inproc_event_sync( int manual, int signaled );
+-extern void signal_inproc_sync( struct inproc_sync *sync );
+-extern void reset_inproc_sync( struct inproc_sync *sync );
+-
+ /* serial functions */
+ 
+ int get_serial_async_timeout(struct object *obj, int type, int count);
+diff --git b/server/protocol.def a/server/protocol.def
+index 59c6436fa88..b87b7d6515a 100644
+--- b/server/protocol.def
++++ a/server/protocol.def
+@@ -1126,7 +1126,6 @@ struct obj_locator
+     thread_id_t  tid;          /* thread id of the new thread */
+     timeout_t    server_start; /* server start time */
+     unsigned int session_id;   /* process session id */
+-    obj_handle_t inproc_device;/* inproc device fd in flight with this handle */
+     data_size_t  info_size;    /* total size of startup info */
+     VARARG(machines,ushorts);  /* array of supported machines */
+ @END
+@@ -4092,7 +4091,7 @@ struct handle_info
+     obj_handle_t handle;       /* process handle */
+ @END
+ 
+-/* Iterate processes using global process list */
++/* Itererate processes using global process list */
+ @REQ(get_next_process)
+     obj_handle_t last;         /* process handle to start with */
+     unsigned int access;       /* desired access for returned handle */
+@@ -4122,21 +4121,6 @@ struct handle_info
+ @REPLY
+     int enable;                /* previous state of auto-repeat enable */
+ @END
+-
+-
+-enum inproc_sync_type
+-{
+-    INPROC_SYNC_UNKNOWN = 0,
+-    INPROC_SYNC_EVENT = 1,
+-};
+-
+-/* Get the in-process synchronization fd associated with the waitable handle */
+-@REQ(get_inproc_sync_fd)
+-    obj_handle_t handle;        /* handle to the object */
+-@REPLY
+-    int           type;         /* inproc sync type */
+-    unsigned int access;        /* handle access rights */
+-@END
+ 
+ 
+ /* Create a global d3dkmt object */
+diff --git b/server/queue.c a/server/queue.c
+index 596742bc64c..c3d80ed7f2d 100644
+--- b/server/queue.c
++++ a/server/queue.c
+@@ -116,7 +116,6 @@ struct msg_queue
+ {
+     struct object          obj;             /* object header */
+     struct fd             *fd;              /* optional file descriptor to poll */
+-    struct inproc_sync    *inproc_sync;     /* inproc sync for client-side waits */
+     int                    signaled;        /* queue is signaled from fd POLLIN or masks */
+     int                    paint_count;     /* pending paint messages count */
+     int                    hotkey_count;    /* pending hotkey messages count */
+@@ -308,7 +307,6 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+     if ((queue = alloc_object( &msg_queue_ops )))
+     {
+         queue->fd              = NULL;
+-        queue->inproc_sync     = NULL;
+         queue->signaled        = 0;
+         queue->paint_count     = 0;
+         queue->hotkey_count    = 0;
+@@ -328,8 +326,11 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+         list_init( &queue->expired_timers );
+         for (i = 0; i < NB_MSG_KINDS; i++) list_init( &queue->msg_list[i] );
+ 
+-        if (get_inproc_device_fd() >= 0 && !(queue->inproc_sync = create_inproc_event_sync( 1, 0 ))) goto error;
+-        if (!(queue->shared = alloc_shared_object())) goto error;
++        if (!(queue->shared = alloc_shared_object()))
++        {
++            release_object( queue );
++            return NULL;
++        }
+ 
+         SHARED_WRITE_BEGIN( queue->shared, queue_shm_t )
+         {
+@@ -351,10 +352,6 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
+     }
+     if (new_input) release_object( new_input );
+     return queue;
+-
+-error:
+-    release_object( queue );
+-    return NULL;
+ }
+ 
+ /* free the message queue of a thread at thread exit */
+@@ -719,13 +716,11 @@ static void signal_queue_sync( struct msg_queue *queue )
+     if (queue->signaled) return;
+     queue->signaled = 1;
+     wake_up( &queue->obj, 0 );
+-    if (queue->inproc_sync) signal_inproc_sync( queue->inproc_sync );
+ }
+ 
+ static void reset_queue_sync( struct msg_queue *queue )
+ {
+     queue->signaled = 0;
+-    if (queue->inproc_sync) reset_inproc_sync( queue->inproc_sync );
+ }
+ 
+ /* check the queue status */
+@@ -1402,7 +1397,6 @@ static void msg_queue_destroy( struct object *obj )
+     if (queue->hooks) release_object( queue->hooks );
+     if (queue->fd) release_object( queue->fd );
+     if (queue->shared) free_shared_object( queue->shared );
+-    if (queue->inproc_sync) release_object( queue->inproc_sync );
+ }
+ 
+ static void msg_queue_poll_event( struct fd *fd, int event )
+@@ -1492,12 +1486,6 @@ int init_thread_queue( struct thread *thread )
+     return (create_msg_queue( thread, NULL ) != NULL);
+ }
+ 
+-struct object *thread_queue_inproc_sync( struct thread *thread )
+-{
+-    if (!thread->queue) return NULL;
+-    return grab_object( thread->queue->inproc_sync );
+-}
+-
+ /* attach two thread input data structures */
+ int attach_thread_input( struct thread *thread_from, struct thread *thread_to )
+ {
+diff --git b/server/request_handlers.h a/server/request_handlers.h
+index cfaf03d1b67..ecb46926845 100644
+--- b/server/request_handlers.h
++++ a/server/request_handlers.h
+@@ -304,7 +304,6 @@ DECL_HANDLER(resume_process);
+ DECL_HANDLER(get_next_process);
+ DECL_HANDLER(get_next_thread);
+ DECL_HANDLER(set_keyboard_repeat);
+-DECL_HANDLER(get_inproc_sync_fd);
+ DECL_HANDLER(d3dkmt_object_create);
+ DECL_HANDLER(d3dkmt_object_query);
+ 
+@@ -606,7 +605,6 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
+     (req_handler)req_get_next_process,
+     (req_handler)req_get_next_thread,
+     (req_handler)req_set_keyboard_repeat,
+-    (req_handler)req_get_inproc_sync_fd,
+     (req_handler)req_d3dkmt_object_create,
+     (req_handler)req_d3dkmt_object_query,
+ };
+@@ -709,9 +707,8 @@ C_ASSERT( offsetof(struct init_first_thread_reply, pid) == 8 );
+ C_ASSERT( offsetof(struct init_first_thread_reply, tid) == 12 );
+ C_ASSERT( offsetof(struct init_first_thread_reply, server_start) == 16 );
+ C_ASSERT( offsetof(struct init_first_thread_reply, session_id) == 24 );
+-C_ASSERT( offsetof(struct init_first_thread_reply, inproc_device) == 28 );
+-C_ASSERT( offsetof(struct init_first_thread_reply, info_size) == 32 );
+-C_ASSERT( sizeof(struct init_first_thread_reply) == 40 );
++C_ASSERT( offsetof(struct init_first_thread_reply, info_size) == 28 );
++C_ASSERT( sizeof(struct init_first_thread_reply) == 32 );
+ C_ASSERT( offsetof(struct init_thread_request, unix_tid) == 12 );
+ C_ASSERT( offsetof(struct init_thread_request, reply_fd) == 16 );
+ C_ASSERT( offsetof(struct init_thread_request, wait_fd) == 20 );
+@@ -2294,11 +2291,6 @@ C_ASSERT( offsetof(struct set_keyboard_repeat_request, period) == 20 );
+ C_ASSERT( sizeof(struct set_keyboard_repeat_request) == 24 );
+ C_ASSERT( offsetof(struct set_keyboard_repeat_reply, enable) == 8 );
+ C_ASSERT( sizeof(struct set_keyboard_repeat_reply) == 16 );
+-C_ASSERT( offsetof(struct get_inproc_sync_fd_request, handle) == 12 );
+-C_ASSERT( sizeof(struct get_inproc_sync_fd_request) == 16 );
+-C_ASSERT( offsetof(struct get_inproc_sync_fd_reply, type) == 8 );
+-C_ASSERT( offsetof(struct get_inproc_sync_fd_reply, access) == 12 );
+-C_ASSERT( sizeof(struct get_inproc_sync_fd_reply) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_request, type) == 12 );
+ C_ASSERT( sizeof(struct d3dkmt_object_create_request) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_reply, global) == 8 );
+diff --git b/server/request_trace.h a/server/request_trace.h
+index f2fe556cd5f..b5d789b2205 100644
+--- b/server/request_trace.h
++++ a/server/request_trace.h
+@@ -148,7 +148,6 @@ static void dump_init_first_thread_reply( const struct init_first_thread_reply *
+     fprintf( stderr, ", tid=%04x", req->tid );
+     dump_timeout( ", server_start=", &req->server_start );
+     fprintf( stderr, ", session_id=%08x", req->session_id );
+-    fprintf( stderr, ", inproc_device=%04x", req->inproc_device );
+     fprintf( stderr, ", info_size=%u", req->info_size );
+     dump_varargs_ushorts( ", machines=", cur_size );
+ }
+@@ -3384,17 +3383,6 @@ static void dump_set_keyboard_repeat_reply( const struct set_keyboard_repeat_rep
+     fprintf( stderr, " enable=%d", req->enable );
+ }
+ 
+-static void dump_get_inproc_sync_fd_request( const struct get_inproc_sync_fd_request *req )
+-{
+-    fprintf( stderr, " handle=%04x", req->handle );
+-}
+-
+-static void dump_get_inproc_sync_fd_reply( const struct get_inproc_sync_fd_reply *req )
+-{
+-    fprintf( stderr, " type=%d", req->type );
+-    fprintf( stderr, ", access=%08x", req->access );
+-}
+-
+ static void dump_d3dkmt_object_create_request( const struct d3dkmt_object_create_request *req )
+ {
+     fprintf( stderr, " type=%08x", req->type );
+@@ -3696,7 +3684,6 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_get_next_process_request,
+     (dump_func)dump_get_next_thread_request,
+     (dump_func)dump_set_keyboard_repeat_request,
+-    (dump_func)dump_get_inproc_sync_fd_request,
+     (dump_func)dump_d3dkmt_object_create_request,
+     (dump_func)dump_d3dkmt_object_query_request,
+ };
+@@ -3998,7 +3985,6 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
+     (dump_func)dump_get_next_process_reply,
+     (dump_func)dump_get_next_thread_reply,
+     (dump_func)dump_set_keyboard_repeat_reply,
+-    (dump_func)dump_get_inproc_sync_fd_reply,
+     (dump_func)dump_d3dkmt_object_create_reply,
+     (dump_func)dump_d3dkmt_object_query_reply,
+ };
+@@ -4300,7 +4286,6 @@ static const char * const req_names[REQ_NB_REQUESTS] =
+     "get_next_process",
+     "get_next_thread",
+     "set_keyboard_repeat",
+-    "get_inproc_sync_fd",
+     "d3dkmt_object_create",
+     "d3dkmt_object_query",
+ };
+diff --git b/server/thread.c a/server/thread.c
+index 64cd1a74702..aa566c10be4 100644
+--- b/server/thread.c
++++ a/server/thread.c
+@@ -1709,7 +1709,6 @@ static int init_thread( struct thread *thread, int reply_fd, int wait_fd )
+ DECL_HANDLER(init_first_thread)
+ {
+     struct process *process = current->process;
+-    int fd;
+ 
+     if (!init_thread( current, req->reply_fd, req->wait_fd )) return;
+ 
+@@ -1732,12 +1731,6 @@ DECL_HANDLER(init_first_thread)
+     reply->server_start = server_start_time;
+     set_reply_data( supported_machines,
+                     min( supported_machines_count * sizeof(unsigned short), get_reply_max_size() ));
+-
+-    if ((fd = get_inproc_device_fd()) >= 0)
+-    {
+-        reply->inproc_device = get_process_id( process ) | 1;
+-        send_client_fd( process, fd, reply->inproc_device );
+-    }
+ }
+ 
+ /* initialize a new thread */
+diff --git b/server/user.h a/server/user.h
+index 0ec6ef3145e..0ebda06b49b 100644
+--- b/server/user.h
++++ a/server/user.h
+@@ -120,7 +120,6 @@ extern void inc_queue_paint_count( struct thread *thread, int incr );
+ extern void queue_cleanup_window( struct thread *thread, user_handle_t win );
+ extern int init_thread_queue( struct thread *thread );
+ extern void check_thread_queue_idle( struct thread *thread );
+-extern struct object *thread_queue_inproc_sync( struct thread *thread );
+ extern int attach_thread_input( struct thread *thread_from, struct thread *thread_to );
+ extern void detach_thread_input( struct thread *thread_from );
+ extern void set_clip_rectangle( struct desktop *desktop, const struct rectangle *rect,
+
 diff --git b/server/mutex.c a/server/mutex.c
 index 573fcda1083..4737b6f711b 100644
 --- b/server/mutex.c
@@ -323,9 +2700,9 @@ index 3845a86c962..3b0bd1826ef 100644
          queue->keystate_lock   = 0;
          queue->ignore_post_msg = 0;
 -        queue->waiting         = 0;
+ 
          list_init( &queue->send_result );
          list_init( &queue->callback_result );
-         list_init( &queue->pending_timers );
 @@ -709,18 +705,6 @@ void add_queue_hook_count( struct thread *thread, unsigned int index, int count
      assert( thread->queue->shared->hooks_count[index] >= 0 );
  }
@@ -1067,9 +3444,9 @@ index 8f01311892f..aa7ec863605 100644
              queue_host_ioctl( screen_buffer->input->server, IOCTL_CONDRV_CLOSE_OUTPUT,
                                screen_buffer->id, NULL, NULL );
      }
+     free_async_queue( &screen_buffer->ioctl_q );
 -    if (screen_buffer->sync) release_object( screen_buffer->sync );
      if (screen_buffer->fd) release_object( screen_buffer->fd );
-     free_async_queue( &screen_buffer->ioctl_q );
  }
  
 +static int screen_buffer_signaled( struct object *obj, struct wait_queue_entry *entry )
@@ -2510,9 +4887,9 @@ index 05ec6a4ec00..83fa8760474 100644
          release_object( apc->owner );
      }
 -    if (apc->sync) release_object( apc->sync );
+     reserve_obj_unbind( apc->reserve );
  }
  
- /* queue an async procedure call */
 @@ -710,7 +686,6 @@ static struct thread_apc *create_apc( struct object *owner, const union apc_call
  
      if ((apc = alloc_object( &thread_apc_ops )))
@@ -4695,25 +7072,25 @@ index 3cdc9375e2d..4e4dd4ef181 100644
      REQ_get_next_thread,
      REQ_set_keyboard_repeat,
 +    REQ_get_linux_sync_device,
+     REQ_d3dkmt_object_create,
+     REQ_d3dkmt_object_query,
      REQ_NB_REQUESTS
- };
- 
 @@ -6498,6 +6511,7 @@ union generic_request
      struct get_next_process_request get_next_process_request;
      struct get_next_thread_request get_next_thread_request;
      struct set_keyboard_repeat_request set_keyboard_repeat_request;
 +    struct get_linux_sync_device_request get_linux_sync_device_request;
+     struct d3dkmt_object_create_request d3dkmt_object_create_request;
+     struct d3dkmt_object_query_request d3dkmt_object_query_request;
  };
- union generic_reply
- {
 @@ -6796,6 +6810,7 @@ union generic_reply
      struct get_next_process_reply get_next_process_reply;
      struct get_next_thread_reply get_next_thread_reply;
      struct set_keyboard_repeat_reply set_keyboard_repeat_reply;
 +    struct get_linux_sync_device_reply get_linux_sync_device_reply;
- };
- 
- #define SERVER_PROTOCOL_VERSION 881
+     struct d3dkmt_object_create_reply d3dkmt_object_create_reply;
+     struct d3dkmt_object_query_reply d3dkmt_object_query_reply;
+     struct d3dkmt_object_open_reply d3dkmt_object_open_reply;
 diff --git a/server/Makefile.in b/server/Makefile.in
 index 6e4e68d6ebf..57250fd0332 100644
 --- a/server/Makefile.in
@@ -4826,22 +7203,25 @@ index 2afc9707869..9011ff3d4f0 100644
  DECL_HANDLER(get_next_thread);
  DECL_HANDLER(set_keyboard_repeat);
 +DECL_HANDLER(get_linux_sync_device);
+ DECL_HANDLER(d3dkmt_object_create);
+ DECL_HANDLER(d3dkmt_object_query);
  
- typedef void (*req_handler)( const void *req, void *reply );
- static const req_handler req_handlers[REQ_NB_REQUESTS] =
 @@ -597,6 +598,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
      (req_handler)req_get_next_process,
      (req_handler)req_get_next_thread,
      (req_handler)req_set_keyboard_repeat,
 +    (req_handler)req_get_linux_sync_device,
+     (req_handler)req_d3dkmt_object_create,
+     (req_handler)req_d3dkmt_object_query,
  };
- 
- C_ASSERT( sizeof(abstime_t) == 8 );
-@@ -2281,3 +2283,4 @@ C_ASSERT( offsetof(struct set_keyboard_repeat_request, period) == 20 );
+@@ -2281,6 +2283,7 @@ C_ASSERT( offsetof(struct set_keyboard_repeat_request, period) == 20 );
  C_ASSERT( sizeof(struct set_keyboard_repeat_request) == 24 );
  C_ASSERT( offsetof(struct set_keyboard_repeat_reply, enable) == 8 );
  C_ASSERT( sizeof(struct set_keyboard_repeat_reply) == 16 );
 +C_ASSERT( sizeof(struct get_linux_sync_device_request) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_request, type) == 12 );
+ C_ASSERT( sizeof(struct d3dkmt_object_create_request) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_reply, global) == 8 );
 diff --git a/server/request_trace.h b/server/request_trace.h
 index bd961791024..23ae334c85a 100644
 --- a/server/request_trace.h
@@ -4862,25 +7242,25 @@ index bd961791024..23ae334c85a 100644
      (dump_func)dump_get_next_thread_request,
      (dump_func)dump_set_keyboard_repeat_request,
 +    (dump_func)dump_get_linux_sync_device_request,
+     (dump_func)dump_d3dkmt_object_create_request,
+     (dump_func)dump_d3dkmt_object_query_request,
  };
- 
- static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
 @@ -3953,6 +3958,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
      (dump_func)dump_get_next_process_reply,
      (dump_func)dump_get_next_thread_reply,
      (dump_func)dump_set_keyboard_repeat_reply,
 +    NULL,
+     (dump_func)dump_d3dkmt_object_create_reply,
+     (dump_func)dump_d3dkmt_object_query_reply,
  };
- 
- static const char * const req_names[REQ_NB_REQUESTS] =
 @@ -4250,6 +4256,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
      "get_next_process",
      "get_next_thread",
      "set_keyboard_repeat",
 +    "get_linux_sync_device",
+     "d3dkmt_object_create",
+     "d3dkmt_object_query",
  };
- 
- static const struct
 -- 
 GitLab
 
@@ -4957,8 +7337,8 @@ index 4e4dd4ef181..372b6652766 100644
      struct get_linux_sync_device_reply get_linux_sync_device_reply;
  };
  
--#define SERVER_PROTOCOL_VERSION 881
-+#define SERVER_PROTOCOL_VERSION 882
+-#define SERVER_PROTOCOL_VERSION 908
++#define SERVER_PROTOCOL_VERSION 909
  
  #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
 diff --git a/server/async.c b/server/async.c
@@ -6915,8 +9295,8 @@ index 64e827f84a2..3fa994c4fb2 100644
          input->console = NULL;
 @@ -885,6 +891,7 @@ static void screen_buffer_destroy( struct object *obj )
      }
-     if (screen_buffer->fd) release_object( screen_buffer->fd );
      free_async_queue( &screen_buffer->ioctl_q );
+     if (screen_buffer->fd) release_object( screen_buffer->fd );
 +    if (use_inproc_sync()) close( screen_buffer->inproc_sync );
  }
  
@@ -7667,9 +10047,9 @@ index b8c7a48669d..489767bc709 100644
          queue->keystate_lock   = 0;
          queue->ignore_post_msg = 0;
 +        queue->inproc_sync     = create_inproc_event( TRUE, FALSE );
+ 
          list_init( &queue->send_result );
          list_init( &queue->callback_result );
-         list_init( &queue->pending_timers );
 @@ -731,7 +734,11 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
      }
      SHARED_WRITE_END;
@@ -8258,26 +10638,31 @@ index 372b6652766..0a15e94322f 100644
      REQ_set_keyboard_repeat,
      REQ_get_linux_sync_device,
 +    REQ_get_linux_sync_obj,
+     REQ_d3dkmt_object_create,
+     REQ_d3dkmt_object_query,
      REQ_NB_REQUESTS
- };
- 
 @@ -6524,6 +6538,7 @@ union generic_request
      struct get_next_thread_request get_next_thread_request;
      struct set_keyboard_repeat_request set_keyboard_repeat_request;
      struct get_linux_sync_device_request get_linux_sync_device_request;
 +    struct get_linux_sync_obj_request get_linux_sync_obj_request;
+     struct d3dkmt_object_create_request d3dkmt_object_create_request;
+     struct d3dkmt_object_query_request d3dkmt_object_query_request;
  };
- union generic_reply
- {
-@@ -6823,8 +6838,9 @@ union generic_reply
+@@ -6823,13 +6838,14 @@ union generic_reply
      struct get_next_thread_reply get_next_thread_reply;
      struct set_keyboard_repeat_reply set_keyboard_repeat_reply;
      struct get_linux_sync_device_reply get_linux_sync_device_reply;
 +    struct get_linux_sync_obj_reply get_linux_sync_obj_reply;
+     struct d3dkmt_object_create_reply d3dkmt_object_create_reply;
+     struct d3dkmt_object_query_reply d3dkmt_object_query_reply;
+     struct d3dkmt_object_open_reply d3dkmt_object_open_reply;
+     struct d3dkmt_share_objects_reply d3dkmt_share_objects_reply;
+     struct d3dkmt_object_open_name_reply d3dkmt_object_open_name_reply;
  };
  
--#define SERVER_PROTOCOL_VERSION 882
-+#define SERVER_PROTOCOL_VERSION 883
+-#define SERVER_PROTOCOL_VERSION 909
++#define SERVER_PROTOCOL_VERSION 910
  
  #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
 diff --git a/server/inproc_sync.c b/server/inproc_sync.c
@@ -8339,18 +10724,18 @@ index 9011ff3d4f0..c047cdcb435 100644
  DECL_HANDLER(set_keyboard_repeat);
  DECL_HANDLER(get_linux_sync_device);
 +DECL_HANDLER(get_linux_sync_obj);
+ DECL_HANDLER(d3dkmt_object_create);
+ DECL_HANDLER(d3dkmt_object_query);
  
- typedef void (*req_handler)( const void *req, void *reply );
- static const req_handler req_handlers[REQ_NB_REQUESTS] =
 @@ -599,6 +600,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
      (req_handler)req_get_next_thread,
      (req_handler)req_set_keyboard_repeat,
      (req_handler)req_get_linux_sync_device,
 +    (req_handler)req_get_linux_sync_obj,
+     (req_handler)req_d3dkmt_object_create,
+     (req_handler)req_d3dkmt_object_query,
  };
- 
- C_ASSERT( sizeof(abstime_t) == 8 );
-@@ -2284,3 +2286,8 @@ C_ASSERT( sizeof(struct set_keyboard_repeat_request) == 24 );
+@@ -2284,6 +2286,11 @@ C_ASSERT( sizeof(struct set_keyboard_repeat_request) == 24 );
  C_ASSERT( offsetof(struct set_keyboard_repeat_reply, enable) == 8 );
  C_ASSERT( sizeof(struct set_keyboard_repeat_reply) == 16 );
  C_ASSERT( sizeof(struct get_linux_sync_device_request) == 16 );
@@ -8359,6 +10744,9 @@ index 9011ff3d4f0..c047cdcb435 100644
 +C_ASSERT( offsetof(struct get_linux_sync_obj_reply, type) == 8 );
 +C_ASSERT( offsetof(struct get_linux_sync_obj_reply, access) == 12 );
 +C_ASSERT( sizeof(struct get_linux_sync_obj_reply) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_request, type) == 12 );
+ C_ASSERT( sizeof(struct d3dkmt_object_create_request) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_reply, global) == 8 );
 diff --git a/server/request_trace.h b/server/request_trace.h
 index 23ae334c85a..ba854fae5b1 100644
 --- a/server/request_trace.h
@@ -8386,25 +10774,25 @@ index 23ae334c85a..ba854fae5b1 100644
      (dump_func)dump_set_keyboard_repeat_request,
      (dump_func)dump_get_linux_sync_device_request,
 +    (dump_func)dump_get_linux_sync_obj_request,
+     (dump_func)dump_d3dkmt_object_create_request,
+     (dump_func)dump_d3dkmt_object_query_request,
  };
- 
- static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
 @@ -3959,6 +3971,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
      (dump_func)dump_get_next_thread_reply,
      (dump_func)dump_set_keyboard_repeat_reply,
      NULL,
 +    (dump_func)dump_get_linux_sync_obj_reply,
+     (dump_func)dump_d3dkmt_object_create_reply,
+     (dump_func)dump_d3dkmt_object_query_reply,
  };
- 
- static const char * const req_names[REQ_NB_REQUESTS] =
 @@ -4257,6 +4270,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
      "get_next_thread",
      "set_keyboard_repeat",
      "get_linux_sync_device",
 +    "get_linux_sync_obj",
+     "d3dkmt_object_create",
+     "d3dkmt_object_query",
  };
- 
- static const struct
 -- 
 GitLab
 
@@ -8464,28 +10852,33 @@ index 0a15e94322f..9919589dcfb 100644
      REQ_get_linux_sync_obj,
 +    REQ_select_inproc_queue,
 +    REQ_unselect_inproc_queue,
+     REQ_d3dkmt_object_create,
+     REQ_d3dkmt_object_query,
      REQ_NB_REQUESTS
- };
- 
 @@ -6539,6 +6565,8 @@ union generic_request
      struct set_keyboard_repeat_request set_keyboard_repeat_request;
      struct get_linux_sync_device_request get_linux_sync_device_request;
      struct get_linux_sync_obj_request get_linux_sync_obj_request;
 +    struct select_inproc_queue_request select_inproc_queue_request;
 +    struct unselect_inproc_queue_request unselect_inproc_queue_request;
+     struct d3dkmt_object_create_request d3dkmt_object_create_request;
+     struct d3dkmt_object_query_request d3dkmt_object_query_request;
  };
- union generic_reply
- {
-@@ -6839,8 +6867,10 @@ union generic_reply
+@@ -6839,13 +6867,15 @@ union generic_reply
      struct set_keyboard_repeat_reply set_keyboard_repeat_reply;
      struct get_linux_sync_device_reply get_linux_sync_device_reply;
      struct get_linux_sync_obj_reply get_linux_sync_obj_reply;
 +    struct select_inproc_queue_reply select_inproc_queue_reply;
 +    struct unselect_inproc_queue_reply unselect_inproc_queue_reply;
+     struct d3dkmt_object_create_reply d3dkmt_object_create_reply;
+     struct d3dkmt_object_query_reply d3dkmt_object_query_reply;
+     struct d3dkmt_object_open_reply d3dkmt_object_open_reply;
+     struct d3dkmt_share_objects_reply d3dkmt_share_objects_reply;
+     struct d3dkmt_object_open_name_reply d3dkmt_object_open_name_reply;
  };
  
--#define SERVER_PROTOCOL_VERSION 883
-+#define SERVER_PROTOCOL_VERSION 884
+-#define SERVER_PROTOCOL_VERSION 910
++#define SERVER_PROTOCOL_VERSION 911
  
  #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
 diff --git a/server/protocol.def b/server/protocol.def
@@ -8524,9 +10917,9 @@ index 489767bc709..457a32d78a6 100644
          queue->ignore_post_msg = 0;
          queue->inproc_sync     = create_inproc_event( TRUE, FALSE );
 +        queue->in_inproc_wait  = 0;
+ 
          list_init( &queue->send_result );
          list_init( &queue->callback_result );
-         list_init( &queue->pending_timers );
 @@ -1279,6 +1281,10 @@ static int is_queue_hung( struct msg_queue *queue )
          if (get_wait_queue_thread(entry)->queue == queue)
              return 0;  /* thread is waiting on queue -> not hung */
@@ -8591,25 +10984,28 @@ index c047cdcb435..cd9e52aeffe 100644
  DECL_HANDLER(get_linux_sync_obj);
 +DECL_HANDLER(select_inproc_queue);
 +DECL_HANDLER(unselect_inproc_queue);
+ DECL_HANDLER(d3dkmt_object_create);
+ DECL_HANDLER(d3dkmt_object_query);
  
- typedef void (*req_handler)( const void *req, void *reply );
- static const req_handler req_handlers[REQ_NB_REQUESTS] =
 @@ -601,6 +603,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
      (req_handler)req_set_keyboard_repeat,
      (req_handler)req_get_linux_sync_device,
      (req_handler)req_get_linux_sync_obj,
 +    (req_handler)req_select_inproc_queue,
 +    (req_handler)req_unselect_inproc_queue,
+     (req_handler)req_d3dkmt_object_create,
+     (req_handler)req_d3dkmt_object_query,
  };
- 
- C_ASSERT( sizeof(abstime_t) == 8 );
-@@ -2291,3 +2295,6 @@ C_ASSERT( sizeof(struct get_linux_sync_obj_request) == 16 );
+@@ -2291,6 +2295,9 @@ C_ASSERT( sizeof(struct get_linux_sync_obj_request) == 16 );
  C_ASSERT( offsetof(struct get_linux_sync_obj_reply, type) == 8 );
  C_ASSERT( offsetof(struct get_linux_sync_obj_reply, access) == 12 );
  C_ASSERT( sizeof(struct get_linux_sync_obj_reply) == 16 );
 +C_ASSERT( sizeof(struct select_inproc_queue_request) == 16 );
 +C_ASSERT( offsetof(struct unselect_inproc_queue_request, signaled) == 12 );
 +C_ASSERT( sizeof(struct unselect_inproc_queue_request) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_request, type) == 12 );
+ C_ASSERT( sizeof(struct d3dkmt_object_create_request) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_reply, global) == 8 );
 diff --git a/server/request_trace.h b/server/request_trace.h
 index ba854fae5b1..870df471c1d 100644
 --- a/server/request_trace.h
@@ -8636,27 +11032,27 @@ index ba854fae5b1..870df471c1d 100644
      (dump_func)dump_get_linux_sync_obj_request,
 +    (dump_func)dump_select_inproc_queue_request,
 +    (dump_func)dump_unselect_inproc_queue_request,
+     (dump_func)dump_d3dkmt_object_create_request,
+     (dump_func)dump_d3dkmt_object_query_request,
  };
- 
- static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
 @@ -3972,6 +3983,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
      (dump_func)dump_set_keyboard_repeat_reply,
      NULL,
      (dump_func)dump_get_linux_sync_obj_reply,
 +    NULL,
 +    NULL,
+     (dump_func)dump_d3dkmt_object_create_reply,
+     (dump_func)dump_d3dkmt_object_query_reply,
  };
- 
- static const char * const req_names[REQ_NB_REQUESTS] =
 @@ -4271,6 +4284,8 @@ static const char * const req_names[REQ_NB_REQUESTS] =
      "set_keyboard_repeat",
      "get_linux_sync_device",
      "get_linux_sync_obj",
 +    "select_inproc_queue",
 +    "unselect_inproc_queue",
+     "d3dkmt_object_create",
+     "d3dkmt_object_query",
  };
- 
- static const struct
 -- 
 GitLab
 
@@ -8706,26 +11102,31 @@ index 9919589dcfb..45b8d41d474 100644
      REQ_select_inproc_queue,
      REQ_unselect_inproc_queue,
 +    REQ_get_inproc_alert_event,
+     REQ_d3dkmt_object_create,
+     REQ_d3dkmt_object_query,
      REQ_NB_REQUESTS
- };
- 
 @@ -6567,6 +6582,7 @@ union generic_request
      struct get_linux_sync_obj_request get_linux_sync_obj_request;
      struct select_inproc_queue_request select_inproc_queue_request;
      struct unselect_inproc_queue_request unselect_inproc_queue_request;
 +    struct get_inproc_alert_event_request get_inproc_alert_event_request;
+     struct d3dkmt_object_create_request d3dkmt_object_create_request;
+     struct d3dkmt_object_query_request d3dkmt_object_query_request;
  };
- union generic_reply
- {
-@@ -6869,8 +6885,9 @@ union generic_reply
+@@ -6869,13 +6885,14 @@ union generic_reply
      struct get_linux_sync_obj_reply get_linux_sync_obj_reply;
      struct select_inproc_queue_reply select_inproc_queue_reply;
      struct unselect_inproc_queue_reply unselect_inproc_queue_reply;
 +    struct get_inproc_alert_event_reply get_inproc_alert_event_reply;
+     struct d3dkmt_object_create_reply d3dkmt_object_create_reply;
+     struct d3dkmt_object_query_reply d3dkmt_object_query_reply;
+     struct d3dkmt_object_open_reply d3dkmt_object_open_reply;
+     struct d3dkmt_share_objects_reply d3dkmt_share_objects_reply;
+     struct d3dkmt_object_open_name_reply d3dkmt_object_open_name_reply;
  };
  
--#define SERVER_PROTOCOL_VERSION 884
-+#define SERVER_PROTOCOL_VERSION 885
+-#define SERVER_PROTOCOL_VERSION 911
++#define SERVER_PROTOCOL_VERSION 912
  
  #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
 diff --git a/server/protocol.def b/server/protocol.def
@@ -8752,24 +11153,27 @@ index cd9e52aeffe..a5f48e0e968 100644
  DECL_HANDLER(select_inproc_queue);
  DECL_HANDLER(unselect_inproc_queue);
 +DECL_HANDLER(get_inproc_alert_event);
+ DECL_HANDLER(d3dkmt_object_create);
+ DECL_HANDLER(d3dkmt_object_query);
  
- typedef void (*req_handler)( const void *req, void *reply );
- static const req_handler req_handlers[REQ_NB_REQUESTS] =
 @@ -605,6 +606,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
      (req_handler)req_get_linux_sync_obj,
      (req_handler)req_select_inproc_queue,
      (req_handler)req_unselect_inproc_queue,
 +    (req_handler)req_get_inproc_alert_event,
+     (req_handler)req_d3dkmt_object_create,
+     (req_handler)req_d3dkmt_object_query,
  };
- 
- C_ASSERT( sizeof(abstime_t) == 8 );
-@@ -2298,3 +2300,6 @@ C_ASSERT( sizeof(struct get_linux_sync_obj_reply) == 16 );
+@@ -2298,6 +2300,9 @@ C_ASSERT( sizeof(struct get_linux_sync_obj_reply) == 16 );
  C_ASSERT( sizeof(struct select_inproc_queue_request) == 16 );
  C_ASSERT( offsetof(struct unselect_inproc_queue_request, signaled) == 12 );
  C_ASSERT( sizeof(struct unselect_inproc_queue_request) == 16 );
 +C_ASSERT( sizeof(struct get_inproc_alert_event_request) == 16 );
 +C_ASSERT( offsetof(struct get_inproc_alert_event_reply, handle) == 8 );
 +C_ASSERT( sizeof(struct get_inproc_alert_event_reply) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_request, type) == 12 );
+ C_ASSERT( sizeof(struct d3dkmt_object_create_request) == 16 );
+ C_ASSERT( offsetof(struct d3dkmt_object_create_reply, global) == 8 );
 diff --git a/server/request_trace.h b/server/request_trace.h
 index 870df471c1d..dbe5bd8abc5 100644
 --- a/server/request_trace.h
@@ -8795,25 +11199,25 @@ index 870df471c1d..dbe5bd8abc5 100644
      (dump_func)dump_select_inproc_queue_request,
      (dump_func)dump_unselect_inproc_queue_request,
 +    (dump_func)dump_get_inproc_alert_event_request,
+     (dump_func)dump_d3dkmt_object_create_request,
+     (dump_func)dump_d3dkmt_object_query_request,
  };
- 
- static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
 @@ -3985,6 +3995,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
      (dump_func)dump_get_linux_sync_obj_reply,
      NULL,
      NULL,
 +    (dump_func)dump_get_inproc_alert_event_reply,
+     (dump_func)dump_d3dkmt_object_create_reply,
+     (dump_func)dump_d3dkmt_object_query_reply,
  };
- 
- static const char * const req_names[REQ_NB_REQUESTS] =
 @@ -4286,6 +4297,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
      "get_linux_sync_obj",
      "select_inproc_queue",
      "unselect_inproc_queue",
 +    "get_inproc_alert_event",
+     "d3dkmt_object_create",
+     "d3dkmt_object_query",
  };
- 
- static const struct
 diff --git a/server/thread.c b/server/thread.c
 index ab448346319..843cca458a8 100644
 --- a/server/thread.c
@@ -10096,8 +12500,8 @@ index a5ca6ef99eb..250493cc3e9 100644
  
 +extern void close_inproc_sync_obj( HANDLE handle );
 +
- extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
-                                           PNTAPCFUNC func, NTSTATUS status );
+ extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
+                                           ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status );
  extern NTSTATUS call_user_exception_dispatcher( EXCEPTION_RECORD *rec, CONTEXT *context );
 -- 
 GitLab
